@@ -7,7 +7,7 @@ Supported Methods:
 2. 2022_only - Use 2022 data only
 3. rag_only - RAG based prediction
 4. rag_stm_ltm - RAG + STM + LTM (No KG)
-5. full_framework - RAG + STM + LTM + KG (Full Framework)
+5. MIRROR - RAG + STM + LTM + KG (Full Framework)
 """
 import os
 import sys
@@ -35,11 +35,11 @@ from utils import (
 SUPPORTED_METHODS = ['2018_only', '2022_only', 'LLM_only', 'RER', 'RER_LTE', 'RER_KG', 'MIRROR']
 
 METHOD_MAPPING = {
-    'LLM_only': None,           # 도구 없음
-    'RER': 'rag_only',          # RAG만
-    'RER_LTE': 'rag_stm_ltm',   # RAG + LTM
-    'RER_KG': 'rag_kg',         # RAG + KG (새로 추가 필요)
-    'MIRROR': 'full',           # 전체
+    'LLM_only': None,               # 도구 없음
+    'RER': 'rag_only',              # RAG만
+    'RER_LTE': 'rag_stm_ltm',       # RAG + LTM
+    'RER_KG': 'rag_kg',             # RAG + KG
+    'MIRROR': 'MIRROR',             # 전체
 }
 
 class BaselinePredictor:
@@ -106,6 +106,9 @@ def run_single_method(student_id: str, method: str, targets: List[Dict],
                       exclude_target: bool = False, exclude_partial: bool = False,
                       result_suffix: str = "", output_dir: str = None) -> Dict:
     """Run prediction for a single student with a specific method"""
+    if method in METHOD_MAPPING:
+        method = METHOD_MAPPING[method]
+
     base_dir = output_dir if output_dir else Config.RESULTS_DIR
     dir_suffix = result_suffix if result_suffix else ""
     result_dir = os.path.join(base_dir, f"{method}{dir_suffix}")
@@ -151,7 +154,7 @@ def run_single_method(student_id: str, method: str, targets: List[Dict],
         )
         predictions, reasons = agent.predict_batch(targets)
     
-    elif method == "full_framework":
+    elif method == "MIRROR":
         agent = create_agent(
             student_id, "simplified",
             exclude_target=exclude_target,
@@ -319,7 +322,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--student", type=str)
     parser.add_argument("--all", action="store_true")
-    parser.add_argument("--methods", type=str, nargs='+', default=["full_framework"]) # Default changed
+    parser.add_argument("--methods", type=str, nargs='+', default=["MIRROR"]) # Default changed
     parser.add_argument("--rebuild", action="store_true")
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--exclude-target", action="store_true")

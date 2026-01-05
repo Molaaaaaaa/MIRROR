@@ -5,7 +5,7 @@ import os
 
 class Config:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    DATA_DIR = os.path.join(BASE_DIR, "data")
+    DATA_DIR = os.path.join(BASE_DIR, "data", "students")
     SCHEMA_FILE = os.path.join(BASE_DIR, "data", "schema.json")
     RESULTS_DIR = os.path.join(BASE_DIR, "results")
     CHROMA_DIR = os.path.join(BASE_DIR, "chroma_cache")

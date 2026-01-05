@@ -29,7 +29,7 @@ MIRROR/
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.8+
 - Ollama (for local LLM inference)
 - NVIDIA GPU (recommended)
 
@@ -65,11 +65,20 @@ python build_category_similarity.py
 
 ### 2. Run Prediction Experiments (Online Stage)
 ```bash
-# Run with full MIRROR framework
+# Single student experiment
+python run_experiments.py --student 12852 --methods MIRROR
+
+# All students with full MIRROR framework
 python run_experiments.py --all --methods MIRROR
 
 # Compare with baselines
 python run_experiments.py --all --methods 2018_only 2022_only LLM_only RER RER_LTE MIRROR
+
+# Experimental settings (S2: Violence-blinded)
+python run_experiments.py --all --methods MIRROR --exclude-target
+
+# Experimental settings (S3: S2 + Aggression)
+python run_experiments.py --all --methods MIRROR --exclude-partial
 ```
 
 ## Configuration
