@@ -1,0 +1,15 @@
+# Project specific - Caches
+chroma_cache/
+agent_memory/
+results/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.env
+.venv
+venv/
+ENV/
