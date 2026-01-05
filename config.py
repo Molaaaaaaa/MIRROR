@@ -23,10 +23,6 @@ class Config:
     ANALYSIS_YEARS = [2019, 2020, 2021, 2022]
     TARGET_YEAR = 2023
     
-    NEO4J_URL = os.getenv("NEO4J_URL", "")
-    NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
-    NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "")
-    
     INPUT_VARIABLES = [
         "시/도(학교 기준)",
         "도시규모(학교 기준)",
