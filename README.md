@@ -1,7 +1,5 @@
 # MIRROR: Multi-view Inference via Retrospective Retrieval for Ontological Representation of Persona
 
-Official implementation of the paper "MIRROR: Multi-view Inference via Retrospective Retrieval for Ontological Representation of Persona" (Anonymous Submission).
-
 ## Overview
 
 MIRROR is a model-agnostic framework for closed-set next-year prediction from longitudinal survey data. It performs single-pass, item-conditioned inference by:
@@ -35,10 +33,6 @@ MIRROR/
 
 ## Installation
 ```bash
-# Clone repository
-git clone https://github.com/anonymous/MIRROR.git
-cd MIRROR
-
 # Install dependencies
 pip install -r requirements.txt
 
@@ -97,7 +91,3 @@ KNOWLEDGE_YEARS = [2018, 2019, 2020, 2021, 2022]  # Training years
 | S1 (Full-history) | Use all 2018-2022 survey responses |
 | S2 (Violence-blinded) | Exclude Aggression, Delinquency, School Violence |
 | S3 (S2 + Aggression) | S2 with Aggression history restored |
-
-## Results
-
-See paper Section 4 for detailed experimental results and analysis.
