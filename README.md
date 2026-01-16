@@ -11,18 +11,25 @@ MIRROR is a model-agnostic framework for closed-set next-year prediction from lo
 ## Project Structure
 ```
 MIRROR/
-├── mirror_framework.py              # LLM reasoning by mirror framework
-├── build_ltm.py                     # Longitudinal Trend Extraction
-├── build_kg.py                      # Knowledge Graph construction
+├── mirror_framework.py              # LLM reasoning by MIRROR framework
+├── build_ltm.py                     # Longitudinal Trend Extraction (LTE)
+├── build_kg.py                      # Per-student Knowledge Graph
+├── build_global_kg.py               # Global Knowledge Graph
 ├── build_behavioral_correlation.py  # KG - Behavioral correlation edges
 ├── build_category_similarity.py     # KG - Semantic similarity edges
-├── tools.py                         # Framework tools
+├── tools.py                         # Framework tools (RAG, STM, LTM, KG)
 ├── memory_manager.py                # LTM/STM management
 ├── run_experiments.py               # Experiment runner
 ├── config.py                        # Configuration settings
+├── data_constants.py                # Dataset-specific constants
 ├── utils.py                         # Utility functions
 ├── requirements.txt                 # Dependencies
-└── data/                            # Dataset
+├── mirror_memory/                   # Generated LTM/KG cache (auto-created)
+├── chroma_cache/                    # RAG vector store (auto-created)
+├── results/                         # Experiment results (auto-created)
+└── data/
+    ├── students/                    # Student longitudinal survey data
+    └── schema.json                  # Question-option mapping schema
 ```
 
 ## Requirements
