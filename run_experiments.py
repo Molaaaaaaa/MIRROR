@@ -10,11 +10,8 @@ Supported Methods:
 5. MIRROR - RAG + STM + LTM + KG (Full Framework)
 """
 import os
-import sys
-import json
 import argparse
 import pandas as pd
-from datetime import datetime
 from typing import Dict, List, Tuple
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -22,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from langchain_ollama import ChatOllama
 
 from config import Config
-from agent import create_agent
+from mirror_framework import create_predictor
 from utils import (
     load_student_data,
     load_ground_truth,
@@ -35,11 +32,11 @@ from utils import (
 SUPPORTED_METHODS = ['2018_only', '2022_only', 'LLM_only', 'RER', 'RER_LTE', 'RER_KG', 'MIRROR']
 
 METHOD_MAPPING = {
-    'LLM_only': None,               # 도구 없음
-    'RER': 'rag_only',              # RAG만
-    'RER_LTE': 'rag_stm_ltm',       # RAG + LTM
-    'RER_KG': 'rag_kg',             # RAG + KG
-    'MIRROR': 'MIRROR',             # 전체
+    'LLM_only': None,
+    'RER': 'rag_only',
+    'RER_LTE': 'rag_stm_ltm',
+    'RER_KG': 'rag_kg',
+    'MIRROR': 'MIRROR',
 }
 
 class BaselinePredictor:
@@ -70,11 +67,11 @@ class BaselinePredictor:
         options_str = "\n".join([f"{k}. {v}" for k, v in options.items()])
         
         if self.method == "2018_only":
-            answer = self.history.get("2018", {}).get(question, "없음")
-            context = f"[2018년] {answer}"
+            answer = self.history.get("2018", {}).get(question, "N/A")
+            context = f"[2018] {answer}"
         elif self.method == "2022_only":
-            answer = self.history.get("2022", {}).get(question, "없음")
-            context = f"[2022년] {answer}"
+            answer = self.history.get("2022", {}).get(question, "N/A")
+            context = f"[2022] {answer}"
         else:
             context = "Unknown"
         
@@ -84,8 +81,7 @@ class BaselinePredictor:
 선택지:
 {options_str}
 
-2023년 답변 번호(1~6)만:"""
-        
+2023년 답 번호 (1~6만):"""
         try:
             response = self.llm.invoke(prompt)
             return clean_llm_output(response.content), self.method
@@ -137,31 +133,31 @@ def run_single_method(student_id: str, method: str, targets: List[Dict],
         predictions, reasons = predictor.predict_batch(targets)
     
     elif method == "rag_only":
-        agent = create_agent(
+        predictor = create_predictor(
             student_id, "simplified", 
             exclude_target=exclude_target,
             exclude_partial=exclude_partial,
             tool_set="rag_only"
         )
-        predictions, reasons = agent.predict_batch(targets)
+        predictions, reasons = predictor.predict_batch(targets)
     
     elif method == "rag_stm_ltm":
-        agent = create_agent(
+        predictor = create_predictor(
             student_id, "simplified",
             exclude_target=exclude_target,
             exclude_partial=exclude_partial,
             tool_set="rag_stm_ltm"
         )
-        predictions, reasons = agent.predict_batch(targets)
+        predictions, reasons = predictor.predict_batch(targets)
     
     elif method == "MIRROR":
-        agent = create_agent(
+        predictor = create_predictor(
             student_id, "simplified",
             exclude_target=exclude_target,
             exclude_partial=exclude_partial,
             tool_set="full"
         )
-        predictions, reasons = agent.predict_batch(targets)
+        predictions, reasons = predictor.predict_batch(targets)
     
     else:
         return {'accuracy': 0, 'correct': 0, 'total': 0, 'cached': False}

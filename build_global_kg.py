@@ -20,11 +20,11 @@ def cosine_similarity(vec1: np.ndarray, vec2: np.ndarray) -> float:
     return float(np.dot(vec1, vec2) / (norm1 * norm2))
 
 
-class CategorySimilarityBuilder:
+class GlobalKGBuilder:
     
     def __init__(self):
         self.embeddings = HuggingFaceEmbeddings(
-            model_name="SamilPwC-AXNode-GenAI/PwC-Embedding_expr",
+            model_name="jhgan/ko-sroberta-multitask",
             model_kwargs={"device": "cpu"},
             encode_kwargs={"normalize_embeddings": True}
         )
@@ -69,9 +69,7 @@ class CategorySimilarityBuilder:
                 continue
             
             texts = [f"{category}: {q}" for q in questions]
-            
             embeddings = self.embeddings.embed_documents(texts)
-            
             avg_embedding = np.mean(embeddings, axis=0)
             self.category_embeddings[category] = avg_embedding
         
@@ -116,7 +114,7 @@ class CategorySimilarityBuilder:
         self.compute_category_relationships(threshold=0.3)
         
         return {
-            "type": "category_embedding_similarity",
+            "type": "global_category_kg",
             "description": "Semantic similarity-based relationships between categories (question text embedding)",
             "category_count": len(self.category_questions),
             "category_relationships": self.category_relationships,
@@ -127,7 +125,7 @@ class CategorySimilarityBuilder:
     
     def save(self, output_path: str = None) -> str:
         if output_path is None:
-            output_path = os.path.join(Config.MIRROR_MEMORY_DIR, "category_similarity.json")
+            output_path = os.path.join(Config.MIRROR_MEMORY_DIR, "global_category_kg.json")
         
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         
@@ -140,12 +138,12 @@ class CategorySimilarityBuilder:
         return output_path
 
 
-def load_category_similarity(path: str = None) -> Dict:
-    if path is None:
-        path = os.path.join(Config.MIRROR_MEMORY_DIR, "category_similarity.json")
+def load_global_kg(kg_path: str = None) -> Dict:
+    if kg_path is None:
+        kg_path = os.path.join(Config.MIRROR_MEMORY_DIR, "global_category_kg.json")
     
-    if os.path.exists(path):
-        with open(path, 'r', encoding='utf-8') as f:
+    if os.path.exists(kg_path):
+        with open(kg_path, 'r', encoding='utf-8') as f:
             return json.load(f)
     return {}
 
@@ -153,20 +151,20 @@ def load_category_similarity(path: str = None) -> Dict:
 if __name__ == "__main__":
     import argparse
     
-    parser = argparse.ArgumentParser(description="Build Category Embedding Similarity")
+    parser = argparse.ArgumentParser(description="Build Global Category KG")
     parser.add_argument("--output", type=str, default=None, help="Output path")
     parser.add_argument("--threshold", type=float, default=0.3, help="Similarity threshold")
     args = parser.parse_args()
     
-    builder = CategorySimilarityBuilder()
+    builder = GlobalKGBuilder()
     builder.collect_all_questions()
     builder.compute_category_embeddings()
     builder.compute_category_relationships(threshold=args.threshold)
     
-    output_path = args.output or os.path.join(Config.MIRROR_MEMORY_DIR, "category_similarity.json")
+    output_path = args.output or os.path.join(Config.MIRROR_MEMORY_DIR, "global_category_kg.json")
     
-    data = {
-        "type": "category_embedding_similarity",
+    kg_data = {
+        "type": "global_category_kg",
         "description": "Semantic similarity-based relationships between categories (question text embedding)",
         "threshold": args.threshold,
         "category_count": len(builder.category_questions),
@@ -178,7 +176,7 @@ if __name__ == "__main__":
     
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+        json.dump(kg_data, f, ensure_ascii=False, indent=2)
     
     print(f"\nSaved to: {output_path}")
     

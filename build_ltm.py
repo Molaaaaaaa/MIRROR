@@ -1,15 +1,3 @@
-"""
-LTM (Long-Term Memory) 구축 스크립트 v3
-파일명: build_ltm.py
-
-핵심 개선사항:
-1. 급격한 변화(sudden shift) 감지 및 플래깅
-2. 최근 연도(2022) 가중 트렌드 분석
-3. 응답 일관성/모순 검출
-4. 예측 힌트(prediction_hints) 생성
-5. 데이터 품질 점수(quality_score) 산출
-6. LLM 기반 연간 분석 및 서사 생성 (복원)
-"""
 import os
 import sys
 import json
@@ -20,6 +8,16 @@ from datetime import datetime
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
+from data_constants import (
+    RESPONSE_SCALE,
+    NEGATIVE_KEYWORDS,
+    INPUT_VARIABLE_NAMES,
+    CATEGORY_HAPPINESS,
+    CATEGORY_DEPRESSION,
+    CATEGORY_SELF_ESTEEM,
+    CATEGORY_LIFE_SATISFACTION,
+    WELLBEING_CATEGORIES,
+)
 
 from langchain_ollama import ChatOllama
 
@@ -27,24 +25,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import Config
 from utils import load_student_data, get_all_student_ids, extract_category
-
-
-RESPONSE_SCALE = {
-    '전혀 그렇지 않다': 1, '그렇지 않은 편이다': 2, '그런 편이다': 3, '매우 그렇다': 4,
-    '전혀 없다': 1, '1~2번': 2, '3~5번': 3, '6번 이상': 4,
-    '전혀 안함': 0, '30분 미만': 1, '30분 ~ 1시간 미만': 2, '1시간 ~ 2시간 미만': 3,
-    '2시간 ~ 3시간 미만': 4, '3시간 ~ 4시간 미만': 5, '4시간 이상~': 6,
-    '아주 불행한 사람이다': 1, '불행한 사람이다': 2, '행복한 사람이다': 3, '아주 행복한 사람이다': 4,
-    '전혀 못 잔다': 1, '못 자는 편이다': 2, '잘 자는 편이다': 3, '매우 잘 잔다': 4,
-    '없다': 0, '1~2회': 1, '3~4회': 2, '5회 이상': 3,
-}
-
-NEGATIVE_DIRECTION_KEYWORDS = [
-    '무기력', '우울', '공격성', '위축', '비행', '거부', '강요', '비일관성',
-    '방해', '화가', '울 때', '싸우', '트집', '불행', '외롭', '힘들',
-    '쓸모없', '실패', '못하게', '관심이 없', '충돌', '없다고 느끼'
-]
-
 
 def get_numeric_value(response: str) -> Optional[float]:
     if response in RESPONSE_SCALE:
@@ -56,7 +36,7 @@ def get_numeric_value(response: str) -> Optional[float]:
 
 
 def is_negative_direction(question: str) -> bool:
-    return any(kw in question for kw in NEGATIVE_DIRECTION_KEYWORDS)
+    return any(kw in question for kw in NEGATIVE_KEYWORDS)
 
 
 def calculate_trend(values: List[float]) -> Dict[str, Any]:
@@ -136,8 +116,6 @@ def detect_sudden_shift(values: List[Any], years: List[int]) -> Optional[Dict]:
 
 
 class LTMBuilder:
-    """LTM 구축 클래스 - LLM 기반 분석 포함"""
-    
     def __init__(self, student_id: str, llm: ChatOllama = None):
         self.student_id = student_id
         
@@ -146,7 +124,6 @@ class LTMBuilder:
         )
         self.history = {k: v for k, v in self.history.items() if int(k) < Config.TARGET_YEAR}
         
-        # LLM 초기화
         self.llm = llm or ChatOllama(
             model=Config.OLLAMA_MODEL,
             base_url=Config.OLLAMA_BASE_URL,
@@ -159,7 +136,7 @@ class LTMBuilder:
         
         self.ltm_data = {
             'student_id': student_id,
-            'static_persona': {},  # 추가
+            'static_persona': {},
             'temporal_patterns': {},
             'thematic_profiles': {},
             'yearly_changes': {},
@@ -176,30 +153,21 @@ class LTMBuilder:
         }
 
     def build_static_persona(self):
-        """
-        Static Persona 구축 (논문 Section 2.2)
-        
-        논문 원문:
-        "Static Persona (P_u^static): Includes an individual's background information 
-        (Demographics) that remains relatively stable over time."
-        """
         self.ltm_data['static_persona'] = {
-            'gender': self.input_vars.get('성별', ''),
-            'birth_year': self.input_vars.get('생년', ''),
-            'region': self.input_vars.get('거주지', ''),
-            'school_region': self.input_vars.get('시/도(학교 기준)', ''),
-            'city_size': self.input_vars.get('도시규모(학교 기준)', ''),
-            'siblings': self.input_vars.get('형제자매 수(본인포함)', ''),
-            'raw': self.input_vars  # 원본 데이터 보존
+            'gender': self.input_vars.get(INPUT_VARIABLE_NAMES['gender'], ''),
+            'birth_year': self.input_vars.get(INPUT_VARIABLE_NAMES['birth_year'], ''),
+            'region': self.input_vars.get(INPUT_VARIABLE_NAMES.get('residence_region', ''), ''),
+            'school_region': self.input_vars.get(INPUT_VARIABLE_NAMES['school_region'], ''),
+            'city_size': self.input_vars.get(INPUT_VARIABLE_NAMES['city_size'], ''),
+            'siblings': self.input_vars.get(INPUT_VARIABLE_NAMES['siblings'], ''),
+            'raw': self.input_vars
         }
         
-        # 유효한 필드 수 계산
         valid_fields = sum(1 for v in self.ltm_data['static_persona'].values() 
                         if v and v != {} and v != '')
         print(f"[Static Persona] {valid_fields} demographic fields loaded")
     
     def build_temporal_patterns(self):
-        """시계열 패턴 구축 (통계 기반)"""
         all_questions = set()
         for year_data in self.history.values():
             all_questions.update(year_data.keys())
@@ -289,7 +257,6 @@ class LTMBuilder:
                                    sudden_shift: Optional[Dict], 
                                    is_negative: Optional[bool],
                                    consecutive_same: int) -> Dict:
-        """예측 힌트 생성 (통계 기반)"""
         hints = []
         confidence = 'medium'
         suggested_value = values[-1]
@@ -344,7 +311,6 @@ class LTMBuilder:
         }
     
     def detect_consistency_issues(self):
-        """응답 일관성 문제 감지"""
         issues = []
         
         happiness_patterns = {}
@@ -352,9 +318,9 @@ class LTMBuilder:
         
         for q, data in self.ltm_data['temporal_patterns'].items():
             topic = data['topic']
-            if topic == '행복감':
+            if topic == CATEGORY_HAPPINESS:
                 happiness_patterns[q] = data
-            elif topic in ['우울', '자아존중감', '삶의 만족도']:
+            elif topic in WELLBEING_CATEGORIES:
                 wellbeing_patterns[q] = data
         
         for hq, hdata in happiness_patterns.items():
@@ -365,13 +331,14 @@ class LTMBuilder:
             for wq, wdata in wellbeing_patterns.items():
                 w_topic = wdata['topic']
                 
+                # Check for "unhappy" keyword (Korean: 불행)
                 if '불행' in str(hdata['last_value']):
-                    if w_topic == '우울':
+                    if w_topic == CATEGORY_DEPRESSION:
                         w_numeric = get_numeric_value(str(wdata['last_value']))
                         if w_numeric and w_numeric <= 2:
                             issues.append({
                                 'type': 'contradiction',
-                                'description': f"행복감 낮음({hdata['last_value']}) vs 우울 낮음({wdata['last_value']})",
+                                'description': f"행복도 낮음({hdata['last_value']}) vs 우울 낮음({wdata['last_value']})",
                                 'questions': [hq, wq],
                                 'severity': 'medium'
                             })
@@ -402,7 +369,6 @@ class LTMBuilder:
         self.ltm_data['data_quality']['consistency_issue_count'] = len(issues)
     
     def build_thematic_profiles(self):
-        """주제별 프로필 구축"""
         topic_questions = defaultdict(list)
         
         for question, data in self.ltm_data['temporal_patterns'].items():
@@ -450,7 +416,6 @@ class LTMBuilder:
             }
     
     def calculate_data_quality(self):
-        """데이터 품질 점수 산출"""
         patterns = self.ltm_data['temporal_patterns']
         
         if not patterns:
@@ -481,7 +446,6 @@ class LTMBuilder:
         })
     
     def build_yearly_changes(self):
-        """연간 변화 분석 (LLM 사용)"""
         years = sorted([int(y) for y in self.history.keys()])
         
         for i in range(1, len(years)):
@@ -504,23 +468,20 @@ class LTMBuilder:
             if not changes:
                 self.ltm_data['yearly_changes'][str(curr_year)] = {
                     'change_count': 0,
-                    'summary': '변화 없음',
-                    'llm_analysis': '이전 연도와 동일한 응답 패턴 유지'
+                    'summary': '변화없음',
+                    'llm_analysis': '전년도와 동일한 응답 패턴'
                 }
                 continue
             
-            # 주제별 변화 집계
             topic_changes = defaultdict(list)
             for c in changes:
                 topic_changes[c['topic']].append(c)
             
-            # LLM 분석용 텍스트 준비
             changes_text = "\n".join([
                 f"- [{c['topic']}] {c['question'][:30]}...: {c['before']} -> {c['after']}"
                 for c in changes[:15]
             ])
             
-            # 급변 문항 강조
             sudden_in_year = [
                 q for q, shift in self.ltm_data['sudden_shifts'].items()
                 if shift.get('year') == curr_year
@@ -560,20 +521,16 @@ class LTMBuilder:
             }
     
     def build_overall_narrative(self):
-        """전체 성장 서사 생성 (LLM 사용)"""
-        # 연도별 LLM 분석 결과 수집
         yearly_analyses = []
         for year, data in sorted(self.ltm_data['yearly_changes'].items()):
             analysis = data.get('llm_analysis', '')
             if analysis and '분석 실패' not in analysis:
-                yearly_analyses.append(f"[{year}년] {analysis[:200]}")
+                yearly_analyses.append(f"[{year}년] {analysis[:Config.YEARLY_SUMMARY_MAX_LENGTH]}")
         
-        # 데이터 품질 정보
         quality = self.ltm_data['data_quality']
         difficulty = quality.get('prediction_difficulty', 'unknown')
         shift_ratio = quality.get('sudden_shift_ratio', 0)
         
-        # 주제별 특성
         topic_summary = []
         for topic, profile in sorted(
             self.ltm_data['thematic_profiles'].items(),
@@ -585,7 +542,6 @@ class LTMBuilder:
             trend = profile.get('dominant_trend', 'unknown')
             topic_summary.append(f"- {topic}: 안정성={score:.1f}, 급변율={shift_r:.0%}, 트렌드={trend}")
         
-        # 급변 영역 요약
         shift_topics = Counter(
             self.ltm_data['temporal_patterns'].get(q, {}).get('topic', 'unknown')
             for q in self.ltm_data['sudden_shifts'].keys()
@@ -617,7 +573,6 @@ class LTMBuilder:
             response = self.llm.invoke(prompt)
             self.ltm_data['overall_narrative'] = response.content.strip()
         except Exception as e:
-            # 폴백: 통계 기반 요약
             narrative_parts = [f"예측 난이도: {difficulty}"]
             if top_shift_topics:
                 narrative_parts.append(f"2022년 주요 변화 영역: {top_shift_topics[0][0]} ({top_shift_topics[0][1]}개 문항)")
@@ -627,20 +582,16 @@ class LTMBuilder:
             self.ltm_data['overall_narrative'] = " | ".join(narrative_parts) + f" (LLM 실패: {str(e)[:30]})"
     
     def build_all(self) -> Dict[str, Any]:
-        """전체 LTM 구축"""
         if not self.history:
             return self.ltm_data
         
-        # Phase 0: Static Persona (추가)
         self.build_static_persona()
         
-        # Phase 1: 통계 기반 (빠름)
         self.build_temporal_patterns()
         self.detect_consistency_issues()
         self.build_thematic_profiles()
         self.calculate_data_quality()
         
-        # Phase 2: LLM 기반 (느리지만 심층 분석)
         self.build_yearly_changes()
         self.build_overall_narrative()
         
@@ -648,9 +599,8 @@ class LTMBuilder:
         return self.ltm_data
     
     def save(self, output_dir: str = None, suffix: str = "full_pipeline") -> str:
-        """LTM 저장"""
         if output_dir is None:
-            output_dir = Config.AGENT_MEMORY_DIR
+            output_dir = Config.MIRROR_MEMORY_DIR
         
         os.makedirs(output_dir, exist_ok=True)
         output_path = os.path.join(output_dir, f"{self.student_id}_ltm_{suffix}.json")
@@ -663,7 +613,6 @@ class LTMBuilder:
 
 def build_ltm_for_student(student_id: str, llm: ChatOllama = None, 
                           output_dir: str = None) -> Tuple[str, float, Dict]:
-    """단일 학생 LTM 구축"""
     start = time.time()
     
     builder = LTMBuilder(student_id, llm=llm)
@@ -684,13 +633,12 @@ def build_ltm_for_student(student_id: str, llm: ChatOllama = None,
 
 def build_ltm_batch(student_ids: List[str], output_dir: str = None, 
                     max_workers: int = 2, skip_existing: bool = False):
-    """배치 LTM 구축"""
     print(f"Building LTM for {len(student_ids)} students...")
     print(f"Workers: {max_workers}, Skip existing: {skip_existing}")
     print("=" * 60)
     
     if output_dir is None:
-        output_dir = Config.AGENT_MEMORY_DIR
+        output_dir = Config.MIRROR_MEMORY_DIR
     
     if skip_existing:
         existing = set()
@@ -712,7 +660,6 @@ def build_ltm_batch(student_ids: List[str], output_dir: str = None,
     errors = []
     
     def process_student(sid):
-        # 각 워커마다 별도 LLM 인스턴스
         llm = ChatOllama(
             model=Config.OLLAMA_MODEL,
             base_url=Config.OLLAMA_BASE_URL,
@@ -768,9 +715,8 @@ def build_ltm_batch(student_ids: List[str], output_dir: str = None,
 
 
 def load_student_ltm(student_id: str, ltm_dir: str = None) -> Optional[Dict]:
-    """저장된 LTM 로드"""
     if ltm_dir is None:
-        ltm_dir = Config.AGENT_MEMORY_DIR
+        ltm_dir = Config.MIRROR_MEMORY_DIR
     
     for suffix in ['full_pipeline', 'rich']:
         ltm_path = os.path.join(ltm_dir, f"{student_id}_ltm_{suffix}.json")

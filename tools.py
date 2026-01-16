@@ -1,20 +1,11 @@
-"""
-AI Agent Tools 정의 (v3 - category_similarity fallback 추가)
-파일명: tools.py
-
-핵심 개선:
-1. 신규 문항(데이터 없는 질문)에 대해 관련 카테고리 정보 반환
-2. category_similarity.json을 fallback으로 사용
-3. 카테고리별 프로파일 활용
-"""
 import os
 import json
 import re
 import shutil
-from typing import Dict, List, Any, Optional
+from typing import Dict, List
 from collections import Counter
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import Chroma
+from langchain_chroma import Chroma
 
 from config import Config
 from utils import extract_category
@@ -42,9 +33,7 @@ def get_embeddings():
     return _EMBEDDINGS_CACHE
 
 
-class AgentToolkit:
-    """Agent용 도구 모음 (v3 - category_similarity fallback)"""
-    
+class MirrorToolkit:
     def __init__(self, student_id: str, history: Dict, ltm_data: Dict = None, 
                  kg_data: Dict = None, tool_set: str = 'full'):
         self.student_id = student_id
@@ -72,14 +61,14 @@ class AgentToolkit:
     def _load_or_build_vectorstore(self):
         from langchain_core.documents import Document
         
-        persist_dir = os.path.join(Config.CHROMA_DIR, f"agent_{self.student_id}")
+        persist_dir = os.path.join(Config.CHROMA_DIR, f"mirror_{self.student_id}")
         
         if os.path.exists(persist_dir):
             try:
                 return Chroma(
                     persist_directory=persist_dir,
                     embedding_function=self.embeddings,
-                    collection_name=f"agent_{self.student_id}"
+                    collection_name=f"mirror_{self.student_id}"
                 )
             except Exception:
                 shutil.rmtree(persist_dir, ignore_errors=True)
@@ -104,11 +93,10 @@ class AgentToolkit:
             documents=docs,
             embedding=self.embeddings,
             persist_directory=persist_dir,
-            collection_name=f"agent_{self.student_id}"
+            collection_name=f"mirror_{self.student_id}"
         )
     
     def _build_category_profiles(self) -> Dict[str, Dict]:
-        """카테고리별 통계 프로파일 생성"""
         if self._category_profiles_cache is not None:
             return self._category_profiles_cache
         
@@ -154,17 +142,9 @@ class AgentToolkit:
         return profiles
     
     def _get_related_categories(self, category: str) -> List[str]:
-        """
-        관련 카테고리 탐색
-        
-        우선순위:
-        1. behavioral_correlation.json (응답 패턴 기반)
-        2. category_similarity.json (텍스트 임베딩 기반, 신규 카테고리 fallback)
-        """
         related = []
         
-        # 1순위: behavioral_correlation.json
-        corr_path = os.path.join(Config.AGENT_MEMORY_DIR, "behavioral_correlation.json")
+        corr_path = os.path.join(Config.MIRROR_MEMORY_DIR, "behavioral_correlation.json")
         if os.path.exists(corr_path):
             try:
                 with open(corr_path, 'r', encoding='utf-8') as f:
@@ -178,8 +158,7 @@ class AgentToolkit:
             except:
                 pass
         
-        # 2순위: category_similarity.json (신규 카테고리 fallback)
-        sim_path = os.path.join(Config.AGENT_MEMORY_DIR, "category_similarity.json")
+        sim_path = os.path.join(Config.MIRROR_MEMORY_DIR, "category_similarity.json")
         if os.path.exists(sim_path):
             try:
                 with open(sim_path, 'r', encoding='utf-8') as f:
@@ -193,11 +172,7 @@ class AgentToolkit:
         
         return related
     
-    # =========================================================================
-    # Tool 1: RAG Search
-    # =========================================================================
     def rag_search(self, query: str, k: int = 3) -> str:
-        """RAG 검색"""
         if not self.vectorstore:
             return "[RAG] 검색 가능한 데이터가 없습니다."
         
@@ -209,15 +184,10 @@ class AgentToolkit:
         except:
             return "[RAG] 검색 중 오류가 발생했습니다."
     
-    # =========================================================================
-    # Tool 2: STM Trace
-    # =========================================================================
     def stm_trace(self, question: str) -> str:
-        """STM 시계열 조회 (신규 문항 대응)"""
         patterns = self.ltm_data.get('temporal_patterns', {})
         category = extract_category(question)
         
-        # 1. 정확한 매칭 시도
         pattern = patterns.get(question)
         if not pattern:
             q_core = question.split(']')[-1].strip() if ']' in question else question
@@ -228,7 +198,6 @@ class AgentToolkit:
                     pattern = p
                     break
         
-        # 2. 패턴 있으면 상세 정보 반환
         if pattern:
             series = pattern.get('series', [])
             if series:
@@ -249,8 +218,7 @@ class AgentToolkit:
                     result += f", 최근{consecutive}년연속동일"
                 
                 return result
-        
-        # 3. 히스토리에서 직접 검색
+            
         trace_parts = []
         for year in sorted(self.history.keys()):
             if int(year) >= Config.TARGET_YEAR:
@@ -263,7 +231,6 @@ class AgentToolkit:
         if trace_parts:
             return f"[STM 시계열] {' -> '.join(trace_parts)}"
         
-        # 4. 신규 문항: 관련 카테고리 프로파일 제공
         profiles = self._build_category_profiles()
         related_cats = self._get_related_categories(category)
         
@@ -290,11 +257,7 @@ class AgentToolkit:
         
         return "\n".join(result_parts)
     
-    # =========================================================================
-    # Tool 3: LTM Narrative
-    # =========================================================================
     def ltm_narrative(self) -> str:
-        """LTM 성장 서사 조회"""
         narrative = self.ltm_data.get('overall_narrative', '')
         if not narrative:
             return "[LTM] 성장 서사가 없습니다."
@@ -304,11 +267,7 @@ class AgentToolkit:
         
         return "[LTM] 성장 서사 형식 오류"
     
-    # =========================================================================
-    # Tool 4: KG Query
-    # =========================================================================
     def kg_query(self, question: str) -> str:
-        """KG 조회"""
         if not self.kg_data:
             return "[KG] Knowledge Graph 데이터가 없습니다."
         
@@ -332,11 +291,7 @@ class AgentToolkit:
         
         return "[KG 정보] " + " | ".join(results)
     
-    # =========================================================================
-    # Tool 5: Related Questions
-    # =========================================================================
     def related_questions(self, question: str, max_count: int = 3) -> str:
-        """관련 문항 조회"""
         category = extract_category(question)
         patterns = self.ltm_data.get('temporal_patterns', {})
         
@@ -366,14 +321,10 @@ class AgentToolkit:
         
         if not related:
             return f"[관련문항] '{category}' 카테고리의 관련 문항이 없습니다."
-        
+
         return f"[관련문항-{category}] 유사 응답 패턴: {', '.join(related)}"
     
-    # =========================================================================
-    # Tool 6: Prediction Hint
-    # =========================================================================
     def prediction_hint(self, question: str) -> str:
-        """예측 힌트 조회"""
         hints = self.ltm_data.get('prediction_hints', {})
         
         hint_data = hints.get(question)
@@ -403,11 +354,7 @@ class AgentToolkit:
         
         return " | ".join(parts) if len(parts) > 1 else "[예측힌트] 힌트 없음"
     
-    # =========================================================================
-    # Tool 7: Sudden Shift Check
-    # =========================================================================
     def check_sudden_shift(self, question: str) -> str:
-        """급변 확인"""
         shifts = self.ltm_data.get('sudden_shifts', {})
         
         shift = shifts.get(question)
@@ -424,17 +371,13 @@ class AgentToolkit:
         from_val = shift.get('from_value', '')
         to_val = shift.get('to_value', '')
         stability_before = shift.get('stability_before', 0)
-        
+
         result = f"[급변감지] {year}년: '{from_val}'(이전 {stability_before:.0%}유지) -> '{to_val}'(현재)"
         result += "\n[주의] 2023년 변화지속 또는 이전값 회귀 가능성 고려"
         
         return result
     
-    # =========================================================================
-    # Tool 8: Data Quality Info
-    # =========================================================================
     def data_quality_info(self) -> str:
-        """데이터 품질 정보"""
         quality = self.ltm_data.get('data_quality', {})
         if not quality:
             return "[데이터품질] 품질 정보 없음"
@@ -452,11 +395,7 @@ class AgentToolkit:
         
         return result
     
-    # =========================================================================
-    # Tool 9: Category Profile
-    # =========================================================================
     def category_profile(self, category: str) -> str:
-        """카테고리 프로파일 조회"""
         profiles = self._build_category_profiles()
         
         result_parts = [f"[카테고리 프로파일: {category}]"]
@@ -494,54 +433,6 @@ class AgentToolkit:
                         result_parts.append(f"  - {rel_cat}: {stab_desc}, 주응답 '{mode}'({mode_ratio:.0%})")
         
         return "\n".join(result_parts)
-    
-    # =========================================================================
-    # 도구 목록 반환
-    # =========================================================================
-    def get_tools(self) -> List:
-        """LangChain Agent용 도구 목록 반환"""
-        from langchain_core.tools import StructuredTool
-        
-        all_tools = {
-            'rag_search': StructuredTool.from_function(
-                func=self.rag_search, name="rag_search",
-                description="유사한 과거 응답 검색."
-            ),
-            'stm_trace': StructuredTool.from_function(
-                func=self.stm_trace, name="stm_trace",
-                description="시계열 데이터 조회. 신규 문항이면 관련 카테고리 정보 제공."
-            ),
-            'ltm_narrative': StructuredTool.from_function(
-                func=self.ltm_narrative, name="ltm_narrative",
-                description="학생의 전체 성장 서사 조회."
-            ),
-            'kg_query': StructuredTool.from_function(
-                func=self.kg_query, name="kg_query",
-                description="Knowledge Graph 조회."
-            ),
-            'related_questions': StructuredTool.from_function(
-                func=self.related_questions, name="related_questions",
-                description="관련 문항 응답 패턴 조회."
-            ),
-            'prediction_hint': StructuredTool.from_function(
-                func=self.prediction_hint, name="prediction_hint",
-                description="예측 힌트와 추천값 조회."
-            ),
-            'check_sudden_shift': StructuredTool.from_function(
-                func=self.check_sudden_shift, name="check_sudden_shift",
-                description="급변 여부 확인."
-            ),
-            'data_quality_info': StructuredTool.from_function(
-                func=self.data_quality_info, name="data_quality_info",
-                description="데이터 품질 정보."
-            ),
-            'category_profile': StructuredTool.from_function(
-                func=self.category_profile, name="category_profile",
-                description="카테고리별 응답 패턴 통계."
-            ),
-        }
-        
-        return [all_tools[name] for name in self.enabled_tools if name in all_tools]
     
     def get_enabled_tool_names(self) -> List[str]:
         return self.enabled_tools.copy()

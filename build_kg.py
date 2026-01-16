@@ -1,23 +1,16 @@
-"""
-Knowledge Graph 빌드 스크립트 v2
-파일명: build_kg.py
-
-학생별 KG 데이터 구축:
-- 시계열 트렌드 분석
-- 카테고리 간 상관관계 (category_relationships) - 핵심 추가
-- 변수 간 상관관계
-- AI 인사이트 생성
-"""
 import os
-import sys
 import json
 import argparse
-import numpy as np
 from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
+from data_constants import (
+    RESPONSE_SCALE,
+    FREQUENCY_KEYWORDS,
+    AGREEMENT_KEYWORDS,
+)
 
 from langchain_ollama import ChatOllama
 
@@ -25,19 +18,7 @@ from config import Config
 from utils import load_student_data, get_all_student_ids, extract_category
 
 
-RESPONSE_SCALE = {
-    '전혀 그렇지 않다': 1, '그렇지 않은 편이다': 2, '그런 편이다': 3, '매우 그렇다': 4,
-    '전혀 없다': 1, '1~2번': 2, '3~5번': 3, '6번 이상': 4,
-    '전혀 안함': 0, '30분 미만': 1, '30분 ~ 1시간 미만': 2, '1시간 ~ 2시간 미만': 3,
-    '2시간 ~ 3시간 미만': 4, '3시간 ~ 4시간 미만': 5, '4시간 이상~': 6,
-    '전혀 하지 않는다': 1, '거의 하지 않는다': 2, '가끔 한다': 3, '자주 한다': 4,
-    '아주 불행한 사람이다': 1, '불행한 사람이다': 2, '행복한 사람이다': 3, '아주 행복한 사람이다': 4,
-    '1주일에 1번': 5, '1주일에 여러번': 6, '한 달에 1번': 4, '한 달에 2~3번': 4.5, '1년에 1~2번': 2,
-}
-
-
 def get_numeric_value(response: str) -> Optional[float]:
-    """응답을 수치로 변환"""
     if response in RESPONSE_SCALE:
         return RESPONSE_SCALE[response]
     try:
@@ -47,7 +28,6 @@ def get_numeric_value(response: str) -> Optional[float]:
 
 
 def calculate_trend(values: List[float]) -> str:
-    """트렌드 계산"""
     if len(values) < 2:
         return 'insufficient'
     
@@ -69,7 +49,6 @@ def calculate_trend(values: List[float]) -> str:
 
 
 def calculate_pearson_correlation(x: List[float], y: List[float]) -> float:
-    """피어슨 상관계수 계산"""
     if len(x) != len(y) or len(x) < 2:
         return 0.0
     
@@ -91,8 +70,6 @@ def calculate_pearson_correlation(x: List[float], y: List[float]) -> float:
 
 
 class KGBuilder:
-    """Knowledge Graph 빌더 v2"""
-    
     def __init__(self, student_id: str, llm: ChatOllama = None):
         self.student_id = student_id
         
@@ -116,20 +93,18 @@ class KGBuilder:
             'temporal_trends': {},
             'category_profiles': {},
             'category_relationships': {},
-            'schema': {},  # 추가
+            'schema': {},
             'prediction_hints': {},
-            'agent_insights': {},
+            'mirror _insights': {},
             'metadata': {
                 'build_time': None,
                 'years_covered': sorted([int(y) for y in self.history.keys()])
             }
         }
         
-        # 카테고리별 연도별 평균값 저장 (상관관계 계산용)
         self._category_yearly_values = defaultdict(lambda: defaultdict(list))
     
     def build_temporal_trends(self):
-        """시계열 트렌드 구축 + 카테고리별 값 수집"""
         all_questions = set()
         for year_data in self.history.values():
             all_questions.update(year_data.keys())
@@ -147,7 +122,6 @@ class KGBuilder:
                     numeric = get_numeric_value(val)
                     if numeric is not None:
                         values.append(numeric)
-                        # 카테고리별 연도별 값 수집
                         self._category_yearly_values[category][int(year)].append(numeric)
             
             if not series:
@@ -177,8 +151,6 @@ class KGBuilder:
             self.kg_data['temporal_trends'][question] = trend_data
     
     def build_category_relationships(self):
-        """카테고리 간 상관관계 계산 (핵심 기능)"""
-        # 카테고리별 연도별 평균값 계산
         category_yearly_means = {}
         
         for category, yearly_values in self._category_yearly_values.items():
@@ -187,17 +159,15 @@ class KGBuilder:
                 if values:
                     yearly_means[year] = sum(values) / len(values)
             
-            if len(yearly_means) >= 3:  # 최소 3개 연도 데이터 필요
+            if len(yearly_means) >= 3:
                 category_yearly_means[category] = yearly_means
         
         categories = list(category_yearly_means.keys())
         
-        # 모든 카테고리 쌍에 대해 상관관계 계산
         correlations = defaultdict(list)
         
         for i, cat1 in enumerate(categories):
             for cat2 in categories[i+1:]:
-                # 공통 연도 찾기
                 years1 = set(category_yearly_means[cat1].keys())
                 years2 = set(category_yearly_means[cat2].keys())
                 common_years = sorted(years1 & years2)
@@ -205,27 +175,22 @@ class KGBuilder:
                 if len(common_years) < 3:
                     continue
                 
-                # 상관계수 계산
                 values1 = [category_yearly_means[cat1][y] for y in common_years]
                 values2 = [category_yearly_means[cat2][y] for y in common_years]
                 
                 corr = calculate_pearson_correlation(values1, values2)
                 
-                # 상관계수 절대값이 0.3 이상인 경우만 저장
                 if abs(corr) >= 0.3:
                     correlations[cat1].append((cat2, round(corr, 3)))
                     correlations[cat2].append((cat1, round(corr, 3)))
         
-        # 상관계수 절대값 기준 정렬
         for category in correlations:
             correlations[category].sort(key=lambda x: abs(x[1]), reverse=True)
-            # 상위 5개만 유지
             correlations[category] = correlations[category][:5]
         
         self.kg_data['category_relationships'] = dict(correlations)
     
     def build_category_profiles(self):
-        """카테고리별 프로필 구축"""
         category_questions = defaultdict(list)
         
         for question, trend in self.kg_data['temporal_trends'].items():
@@ -246,7 +211,6 @@ class KGBuilder:
             else:
                 dominant = 'unknown'
             
-            # 관련 카테고리 정보 추가
             related = self.kg_data['category_relationships'].get(category, [])
             
             self.kg_data['category_profiles'][category] = {
@@ -257,7 +221,6 @@ class KGBuilder:
             }
     
     def build_prediction_hints(self):
-        """예측 힌트 생성"""
         for question, trend in self.kg_data['temporal_trends'].items():
             hints = []
             
@@ -287,9 +250,7 @@ class KGBuilder:
             if hints:
                 self.kg_data['prediction_hints'][question] = hints
     
-    def build_agent_insights(self):
-        """LLM 기반 AI 인사이트 생성"""
-        # 주요 카테고리별 요약
+    def build_mirror_insights(self):
         category_summaries = []
         for cat, profile in list(self.kg_data['category_profiles'].items())[:5]:
             trend = profile.get('dominant_trend', 'unknown')
@@ -298,7 +259,6 @@ class KGBuilder:
             related_str = f", 관련: {','.join(related[:2])}" if related else ""
             category_summaries.append(f"- {cat}: {count}개 문항, {trend} 추세{related_str}")
         
-        # 강한 상관관계 요약
         strong_correlations = []
         for cat, relations in self.kg_data['category_relationships'].items():
             for related_cat, corr in relations[:2]:
@@ -306,7 +266,6 @@ class KGBuilder:
                     direction = "양의" if corr > 0 else "음의"
                     strong_correlations.append(f"- {cat} ↔ {related_cat}: {direction} 상관 ({corr})")
         
-        # 급변 문항 식별
         sudden_changes = []
         for question, trend in self.kg_data['temporal_trends'].items():
             series = trend.get('series', [])
@@ -319,44 +278,36 @@ class KGBuilder:
         prompt = f"""학생 {self.student_id}의 설문 데이터를 분석하세요.
 
 [카테고리별 현황]
-{chr(10).join(category_summaries)}
+{chr(10).join(category_summaries[:10])}
 
-[카테고리 간 상관관계]
+[카테고리간 상관관계]
 {chr(10).join(strong_correlations[:5]) if strong_correlations else '특이 상관 없음'}
 
-[2022년 급변 문항 ({len(sudden_changes)}개)]
+[2022년 급변 항목 ({len(sudden_changes)}개)]
 {chr(10).join(sudden_changes[:5]) if sudden_changes else '없음'}
 
 다음을 분석하세요:
-1. 전반적인 발달 특성
-2. 카테고리 간 연관 패턴
+1. 전반적 발달 특성
+2. 카테고리간 관계 패턴
 3. 2023년 예측 시 고려사항
 
 3-4문장으로 요약:"""
         
         try:
             response = self.llm.invoke(prompt)
-            self.kg_data['agent_insights'] = {
+            self.kg_data['mirror_insights'] = {
                 'raw_analysis': response.content.strip(),
                 'sudden_change_count': len(sudden_changes),
                 'strong_correlation_count': len([c for c in strong_correlations if True])
             }
         except Exception as e:
-            self.kg_data['agent_insights'] = {
+            self.kg_data['mirror_insights'] = {
                 'raw_analysis': f"분석 실패: {str(e)[:50]}",
                 'sudden_change_count': len(sudden_changes),
                 'strong_correlation_count': 0
             }
 
     def build_schema_structure(self):
-        """
-        Schema 구조 구축 (논문 Section 2.3)
-        
-        논문 원문:
-        "Node V: Topic Nodes, Question Nodes, and Option Nodes"
-        "Edge E: Inclusion Relationship (Schema): Topic -> Question -> Option"
-        """
-        # 1. 스키마 파일 로드
         if not os.path.exists(Config.SCHEMA_FILE):
             print(f"[Warning] Schema file not found: {Config.SCHEMA_FILE}")
             return
@@ -364,7 +315,6 @@ class KGBuilder:
         with open(Config.SCHEMA_FILE, 'r', encoding='utf-8') as f:
             schema_data = json.load(f)
         
-        # 2. Option Nodes 구축
         option_nodes = {}
         for topic, options in schema_data.items():
             if isinstance(options, list) and options:
@@ -375,14 +325,12 @@ class KGBuilder:
                     'option_type': option_type
                 }
         
-        # 3. Schema Edges 구축 (Topic -> Question 매핑)
         topic_to_questions = defaultdict(list)
         for question, trend in self.kg_data.get('temporal_trends', {}).items():
             topic = trend.get('category', '')
             if topic:
                 topic_to_questions[topic].append(question)
         
-        # 4. KG 데이터에 저장
         self.kg_data['schema'] = {
             'option_nodes': option_nodes,
             'topic_to_questions': dict(topic_to_questions),
@@ -402,15 +350,6 @@ class KGBuilder:
 
 
     def _detect_option_type_from_list(self, options: List[str]) -> str:
-        """
-        선택지 유형 판별 (논문 Section 2.3: Option Type Detection)
-        
-        논문 원문:
-        "Option Type Detection determines whether the item asks about Frequency or Agreement"
-        """
-        FREQUENCY_KEYWORDS = ['없다', '1주일', '한 달', '번', '회', '빈도', '미만', '이상', '시간']
-        AGREEMENT_KEYWORDS = ['그렇다', '그렇지 않다', '매우', '전혀', '편이다']
-        
         text = ' '.join(options)
         freq_score = sum(1 for kw in FREQUENCY_KEYWORDS if kw in text)
         agree_score = sum(1 for kw in AGREEMENT_KEYWORDS if kw in text)
@@ -422,33 +361,26 @@ class KGBuilder:
         return 'other'
     
     def build_all(self) -> Dict[str, Any]:
-        """전체 KG 구축"""
         if not self.history:
             return self.kg_data
         
-        # Phase 1: 시계열 분석 + 카테고리 값 수집
         self.build_temporal_trends()
         
-        # Phase 2: 카테고리 간 상관관계 계산
         self.build_category_relationships()
         
-        # Phase 3: 프로필 및 힌트 생성
         self.build_category_profiles()
         self.build_prediction_hints()
         
-        # Phase 4: Schema 구조 (추가)
         self.build_schema_structure()
         
-        # Phase 5: LLM 인사이트
-        self.build_agent_insights()
+        self.build_mirror_insights()
         
         self.kg_data['metadata']['build_time'] = datetime.now().isoformat()
         return self.kg_data
     
     def save(self, output_dir: str = None) -> str:
-        """KG 저장"""
         if output_dir is None:
-            output_dir = Config.AGENT_MEMORY_DIR
+            output_dir = Config.MIRROR_MEMORY_DIR
         
         os.makedirs(output_dir, exist_ok=True)
         output_path = os.path.join(output_dir, f"{self.student_id}_kg.json")
@@ -463,7 +395,6 @@ class KGBuilder:
 
 def build_kg_for_student(student_id: str, llm: ChatOllama = None,
                          output_dir: str = None) -> Tuple[str, float, Dict]:
-    """단일 학생 KG 구축"""
     import time
     start = time.time()
     
@@ -486,7 +417,6 @@ def build_kg_for_student(student_id: str, llm: ChatOllama = None,
 
 def build_kg_batch(student_ids: List[str], output_dir: str = None,
                    max_workers: int = 2, skip_existing: bool = False):
-    """배치 KG 구축"""
     import time
     
     print(f"Building KG for {len(student_ids)} students...")
@@ -494,7 +424,7 @@ def build_kg_batch(student_ids: List[str], output_dir: str = None,
     print("=" * 60)
     
     if output_dir is None:
-        output_dir = Config.AGENT_MEMORY_DIR
+        output_dir = Config.MIRROR_MEMORY_DIR
     
     if skip_existing:
         existing = set()
@@ -549,7 +479,6 @@ def build_kg_batch(student_ids: List[str], output_dir: str = None,
     print(f"Complete: {success} success, {len(results) - success} failed")
     print(f"Total time: {total_time/60:.1f} min")
     
-    # 상관관계 통계
     if results:
         success_results = [r for r in results if r[1]]
         if success_results:
@@ -560,9 +489,8 @@ def build_kg_batch(student_ids: List[str], output_dir: str = None,
 
 
 def load_student_kg(student_id: str, kg_dir: str = None) -> Optional[Dict]:
-    """저장된 KG 로드"""
     if kg_dir is None:
-        kg_dir = Config.AGENT_MEMORY_DIR
+        kg_dir = Config.MIRROR_MEMORY_DIR
     
     kg_path = os.path.join(kg_dir, f"{student_id}_kg.json")
     if os.path.exists(kg_path):
@@ -582,7 +510,6 @@ if __name__ == "__main__":
     parser.add_argument("--rebuild", action="store_true", help="Rebuild all (ignore existing)")
     args = parser.parse_args()
     
-    # rebuild 옵션이면 skip_existing 무시
     skip = args.skip_existing and not args.rebuild
     
     if args.all or args.student_range:

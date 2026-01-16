@@ -11,14 +11,14 @@ MIRROR is a model-agnostic framework for closed-set next-year prediction from lo
 ## Project Structure
 ```
 MIRROR/
-├── agent.py                         # LLM reasoning agent (Section 2.4)
-├── build_ltm.py                     # Longitudinal Trend Extraction (Section 2.2)
-├── build_kg.py                      # Knowledge Graph construction (Section 2.3)
+├── mirror_framework.py              # LLM reasoning by mirror framework
+├── build_ltm.py                     # Longitudinal Trend Extraction
+├── build_kg.py                      # Knowledge Graph construction
 ├── build_behavioral_correlation.py  # KG - Behavioral correlation edges
 ├── build_category_similarity.py     # KG - Semantic similarity edges
-├── tools.py                         # Agent tools including RER (Section 2.1)
+├── tools.py                         # Framework tools
 ├── memory_manager.py                # LTM/STM management
-├── run_experiments.py               # Experiment runner (Section 4)
+├── run_experiments.py               # Experiment runner
 ├── config.py                        # Configuration settings
 ├── utils.py                         # Utility functions
 ├── requirements.txt                 # Dependencies
@@ -33,6 +33,10 @@ MIRROR/
 
 ## Installation
 ```bash
+# Clone repository
+git clone https://github.com/anonymous/MIRROR.git
+cd MIRROR
+
 # Install dependencies
 pip install -r requirements.txt
 
@@ -60,7 +64,7 @@ python build_category_similarity.py
 ### 2. Run Prediction Experiments (Online Stage)
 ```bash
 # Single student experiment
-python run_experiments.py --student 12852 --methods MIRROR
+python run_experiments.py --student <student_id> --methods MIRROR
 
 # All students with full MIRROR framework
 python run_experiments.py --all --methods MIRROR
