@@ -23,8 +23,8 @@ class Config:
     ANALYSIS_YEARS = [2019, 2020, 2021, 2022]
     TARGET_YEAR = 2023
     
-    # Context length settings (Korean text is more compact than English)
-    NARRATIVE_MAX_LENGTH = 300       # Max length for growth narrative (new questions)
+    # Context length settings
+    NARRATIVE_MAX_LENGTH = 300       # Max length for growth narrative
     NARRATIVE_SHORT_LENGTH = 200     # Shorter narrative for existing questions
     KG_INSIGHT_MAX_LENGTH = 300      # Max length for KG AI insights
     YEARLY_SUMMARY_MAX_LENGTH = 300  # Max length for yearly change summary
