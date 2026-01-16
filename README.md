@@ -41,7 +41,7 @@ MIRROR/
 ## Installation
 ```bash
 # Clone repository
-git clone https://github.com/anonymous/MIRROR.git
+git clone <URL_OF_THIS_ANONYMOUS_REPOSITORY>
 cd MIRROR
 
 # Install dependencies
