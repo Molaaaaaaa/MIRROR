@@ -222,6 +222,5 @@ MIRROR/
 │   ├── schema.json           # Survey question option schema
 │   └── students/             # Student longitudinal data (100 students x 6 years)
 ├── mirror_memory/            # Pre-built LTE and KG data (offline stage output)
-├── chroma_cache/             # Vectorstore cache for RER
 └── results/                  # Experiment results
 ```
