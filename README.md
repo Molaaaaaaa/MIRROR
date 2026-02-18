@@ -36,7 +36,7 @@
 
 ## Dataset
 
-The dataset is derived from the **Korean Children and Youth Panel Survey (KCYPS)**, a nationally representative longitudinal study tracking adolescents from 2018 to 2023.
+**MIRROR-Violence (MIRROR-V)**, a six-year longitudinal youth survey dataset with complete multi-year records for 100 participants. The dataset is derived from the **Korean Children and Youth Panel Survey (KCYPS)**, a nationally representative longitudinal study tracking adolescents from 2018 to 2023.
 
 ### Data Structure
 
