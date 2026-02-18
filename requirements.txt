@@ -1,0 +1,24 @@
+# Core Framework (LangChain 1.x - requires Python >=3.10)
+langchain>=1.2.0
+langchain-community>=0.4.1
+langchain-core>=1.2.6
+langchain-ollama>=1.0.1
+langchain-chroma>=1.1.0
+langchain-huggingface>=1.2.0
+
+# Data Processing
+pandas>=2.2.3
+numpy>=1.26.4,<2.0.0
+tqdm>=4.67.1
+
+# Vector Database
+chromadb>=1.0.0,<2.0.0
+
+# Embeddings & ML
+sentence-transformers>=5.2.0
+torch>=2.0.0
+
+# Utilities
+python-dotenv>=1.0.1
+pydantic>=2.10.3
+openpyxl>=3.1.0

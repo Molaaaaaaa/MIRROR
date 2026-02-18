@@ -1,0 +1,28 @@
+# Project specific
+chroma_cache/
+results/
+results_*/
+*.backup
+*.pdf
+*.zip
+*.zip:Zone.Identifier
+mirror_memory
+
+# IDE / Editor
+.claude/
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.env
+.venv
+venv/
+ENV/
+
+# Other
+*.Identifier
