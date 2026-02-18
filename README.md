@@ -30,7 +30,7 @@
 |  - P_{u,q}: Persona profiles (from LTE)                                       |
 |  - C_q: KG consistency constraints                                            |
 |                                                                               |
-|  Single-step constrained inference -> prediction + explanation                |
+|  Single-step constrained inference -> prediction                             |
 +-----------------------------------------------------------------------------+
 ```
 
@@ -175,7 +175,7 @@ python calc_acc.py results/MIRROR_S1
 ### 2. LTE (Longitudinal Trend Extraction)
 
 **Persona Components:**
-- `P^static_u`: Demographics (gender, birth year, region)
+- `P^static_u`: Demographics (gender, birth year, region, school region, city size, siblings)
 - `P^domain_u`: Domain-level trend summary
 - `P^year_u`: 5-year temporal trace per question
 - `P^change_u`: Sudden shift detection (Z-score > 2.0)

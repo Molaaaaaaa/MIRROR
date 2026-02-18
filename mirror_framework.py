@@ -335,7 +335,11 @@ class MirrorPredictor:
             parts.append(f"지역: {static['region']}")
         if static.get('school_region'):
             parts.append(f"학교지역: {static['school_region']}")
-        
+        if static.get('city_size'):
+            parts.append(f"도시규모: {static['city_size']}")
+        if static.get('siblings'):
+            parts.append(f"형제자매수: {static['siblings']}")
+
         return ", ".join(parts) if parts else ""
     
     def _get_domain_profile(self, category: str) -> str:
