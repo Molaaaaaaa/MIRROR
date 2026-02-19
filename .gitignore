@@ -6,7 +6,7 @@ results_*/
 *.pdf
 *.zip
 *.zip:Zone.Identifier
-mirror_memory
+mirror_memory/
 
 # IDE / Editor
 .claude/

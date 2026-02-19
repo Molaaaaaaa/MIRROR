@@ -16,7 +16,8 @@ class Config:
 
     # Ollama Configuration (local models)
     OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:14b-q8_0")
+    # OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:14b-q8_0")
+    OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma3-27b-q8:latest")
 
     # OpenAI API Configuration
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "YOUR_OPENAI_API_KEY")

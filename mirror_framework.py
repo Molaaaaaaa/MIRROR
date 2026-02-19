@@ -573,7 +573,7 @@ class MirrorPredictor:
                 return "high"
         return "mid"
     
-    def _get_related_category_detail(self, question: str, category: str) -> str:
+    def _get_related_category_detail(self, question: str, category: str, top_k: int = 3) -> str:
         """
         Build related category context with response statistics.
         Paper Section 2.4: "response statistics (Stability, Mode)" from
@@ -581,6 +581,9 @@ class MirrorPredictor:
 
         Provides Mode and Stability summary per related category,
         combined with KG correlation information.
+
+        Args:
+            top_k: Number of related categories to include (default 3, use 5 for cold-start)
         """
         if not self.use_kg:
             return ""
@@ -592,7 +595,7 @@ class MirrorPredictor:
         patterns = self.ltm_data.get('temporal_patterns', {}) if self.use_lte else {}
         context_parts = []
 
-        for rel_cat in related_cats[:3]:
+        for rel_cat in related_cats[:top_k]:
             corr_info = self._get_correlation_info(category, rel_cat)
 
             # Collect response statistics (Stability, Mode) for this category
@@ -701,67 +704,69 @@ class MirrorPredictor:
     def _find_related_categories(self, question: str, category: str) -> List[str]:
         """
         Find related categories using KG graph traversal.
-        
+
         Priority:
         1. Actual graph query via MirrorKnowledgeGraph.get_related_domains()
         2. Student-specific KG relationships
         3. Global behavioral correlation
         4. Semantic similarity
+
+        Returns up to 5 related categories (callers slice as needed).
         """
         if category in self._related_categories_cache:
             return self._related_categories_cache[category]
-        
+
         related = []
-        
-        # Actual graph query 
+
+        # Actual graph query
         if HAS_KG_CLASS and self.kg_data:
             kg_graph = _load_knowledge_graph(self.student_id, self.kg_data)
             if kg_graph:
                 try:
-                    graph_related = kg_graph.get_related_domains(category, top_k=5)
+                    graph_related = kg_graph.get_related_domains(category, top_k=7)
                     for rel_cat, weight in graph_related:
                         if rel_cat != category:
                             related.append(rel_cat)
                     if related:
                         if self.debug:
                             print(f"[KG] Graph query found {len(related)} related categories for {category}")
-                        self._related_categories_cache[category] = related[:3]
-                        return related[:3]
+                        self._related_categories_cache[category] = related[:5]
+                        return related[:5]
                 except Exception as e:
                     if self.debug:
                         print(f"[KG] Graph query failed: {e}")
-        
+
         # Student-specific KG relationships (dict fallback)
         kg_relationships = self.kg_data.get('category_relationships', {})
         if category in kg_relationships:
-            for item in kg_relationships[category][:5]:
+            for item in kg_relationships[category][:7]:
                 if isinstance(item, (list, tuple)) and len(item) >= 1:
                     if item[0] != category:
                         related.append(item[0])
-        
+
         # Global behavioral correlation
         if not related:
             behavioral_corr = _load_behavioral_correlation()
             if behavioral_corr:
                 relationships = behavioral_corr.get('category_relationships', {})
                 if category in relationships:
-                    for item in relationships[category][:5]:
+                    for item in relationships[category][:7]:
                         if isinstance(item, (list, tuple)) and len(item) >= 1:
                             if item[0] != category:
                                 related.append(item[0])
-        
+
         # Semantic similarity
         if not related:
             category_sim = _load_category_similarity()
             if category_sim:
                 sim_rels = category_sim.get('category_relationships', {}).get(category, [])
-                for item in sim_rels[:5]:
+                for item in sim_rels[:7]:
                     if isinstance(item, (list, tuple)) and len(item) >= 1:
                         if item[0] != category:
                             related.append(item[0])
-        
-        self._related_categories_cache[category] = related[:3]
-        return related[:3]
+
+        self._related_categories_cache[category] = related[:5]
+        return related[:5]
     
     def _get_correlation_info(self, cat1: str, cat2: str) -> str:
         """Get correlation info between two categories"""
@@ -970,10 +975,20 @@ class MirrorPredictor:
             prompt_parts.append(ctx['related_context'])
             prompt_parts.append("")
 
+        # [KG] Consistency constraints (complementary correlation info)
+        if ctx['kg_constraints'] and not related_detail:
+            prompt_parts.append(ctx['kg_constraints'])
+            prompt_parts.append("")
+
+        # [LTE] Domain profile (category-level trend context)
+        if ctx['domain_profile']:
+            prompt_parts.append(ctx['domain_profile'])
+            prompt_parts.append("")
+
         # [RER] Retrieved evidence
         if ctx['evidence']:
             prompt_parts.append("[관련 기록]")
-            prompt_parts.append(ctx['evidence'][:400])
+            prompt_parts.append(ctx['evidence'][:500])
             prompt_parts.append("")
 
         # [KG] Valid option range constraint
@@ -996,10 +1011,6 @@ class MirrorPredictor:
         prompt_parts.append("1. 시계열 패턴의 안정성과 응답 수준(low/mid/high)을 고려하세요")
         prompt_parts.append("2. 급변이 있다면 변화 지속 vs 이전 패턴 회귀를 판단하세요")
         prompt_parts.append("3. 관련 카테고리와의 상관관계 방향을 참고하세요")
-
-        # Add stability-based contextual hint (observation only, no answer directive)
-        if ctx['stability'] in ('constant', 'highly_stable'):
-            prompt_parts.append("4. 이 문항의 시계열 패턴은 매우 안정적입니다. 이를 종합적으로 고려하여 판단하세요")
 
         prompt_parts.append("")
         prompt_parts.append("가장 적절한 번호와 간단한 근거를 답하세요.")
@@ -1034,56 +1045,66 @@ class MirrorPredictor:
                             ctx: Dict) -> Tuple[str, str, Dict]:
         """
         Prediction for cold-start questions (no history).
-        
+
         Relies more heavily on:
         - E_{u,q}: Retrieved evidence from other questions (RER)
-        - P_u: Overall narrative (LTE)
-        - C_q: KG constraints (KG)
+        - P_u: Overall narrative and domain profile (LTE)
+        - C_q: KG constraints + related category statistics (KG)
         - Related category detail: item-level response patterns (KG+LTE)
+
+        Cold-start has no item-level history, so all other signals are
+        given more context space to compensate.
         """
         option_type = detect_option_type(options)
         option_type_desc = get_option_type_description(option_type)
         options_str = "\n".join([f"{k}. {v}" for k, v in options.items()])
-        
+
         # Get detailed related category context (KG+LTE combined)
-        related_detail = self._get_related_category_detail(question, ctx['category'])
-        
+        # Cold-start uses top 5 related categories for richer cross-domain signal
+        related_detail = self._get_related_category_detail(question, ctx['category'], top_k=5)
+
         # Build prompt
         prompt_parts = []
         prompt_parts.append("이 학생의 2018-2022년 종단 데이터를 분석하여 2023년 응답을 예측하세요.")
-        prompt_parts.append("(주의: 이 문항은 과거 기록이 없는 신규 문항입니다)")
+        prompt_parts.append("(주의: 이 문항은 과거 기록이 없는 신규 문항입니다. 관련 카테고리 데이터를 활용하세요)")
         prompt_parts.append("")
-        
+
         # [LTE] P^static: Student demographics
         if ctx['static_persona']:
             prompt_parts.append(f"[학생 기본 정보] {ctx['static_persona']}")
             prompt_parts.append("")
 
-        # [LTE] P_u: Narrative
+        # [LTE] P_u: Narrative (more context for cold-start)
         if ctx['narrative']:
-            narrative_short = ctx['narrative'][:300].replace('\n', ' ')
+            narrative_short = ctx['narrative'][:500].replace('\n', ' ')
             prompt_parts.append(f"[학생 성장 서사]")
             prompt_parts.append(narrative_short)
+            prompt_parts.append("")
+
+        # [LTE] Domain profile (critical for cold-start: domain-level trend)
+        if ctx['domain_profile']:
+            prompt_parts.append(ctx['domain_profile'])
             prompt_parts.append("")
 
         # [KG+LTE] Related category detail with item-level patterns
         if related_detail:
             prompt_parts.append(related_detail)
             prompt_parts.append("")
-        elif ctx['kg_constraints']:
-            # Fallback to basic KG constraints
+
+        # [KG] Consistency constraints (complementary to related_detail)
+        if ctx['kg_constraints']:
             prompt_parts.append(ctx['kg_constraints'])
             prompt_parts.append("")
-        
-        # [RER] E_{u,q}: Retrieved evidence
+
+        # [KG] Related category correlation context
+        if ctx['related_context'] and not related_detail:
+            prompt_parts.append(ctx['related_context'])
+            prompt_parts.append("")
+
+        # [RER] E_{u,q}: Retrieved evidence (more context for cold-start)
         if ctx['evidence']:
             prompt_parts.append("[검색된 관련 기록]")
-            prompt_parts.append(ctx['evidence'][:400])
-            prompt_parts.append("")
-        
-        # [LTE] Domain profile
-        if ctx['domain_profile']:
-            prompt_parts.append(ctx['domain_profile'])
+            prompt_parts.append(ctx['evidence'][:600])
             prompt_parts.append("")
 
         # [KG] Valid option range constraint
@@ -1102,11 +1123,12 @@ class MirrorPredictor:
             prompt_parts.append(f"({option_type_desc})")
         prompt_parts.append("")
 
-        # Instructions
+        # Instructions (enhanced for cold-start reasoning)
         prompt_parts.append("[추론 지침]")
         prompt_parts.append("1. 관련 카테고리의 응답 통계(Mode, Stability)를 참고하세요")
         prompt_parts.append("2. 상관관계 방향을 고려하세요 (양의 상관: 유사한 수준, 음의 상관: 반대 수준)")
         prompt_parts.append("3. 학생의 전반적인 성향과 발달 궤적을 고려하세요")
+        prompt_parts.append("4. 도메인 프로필의 안정성과 추세를 고려하세요")
         prompt_parts.append("")
         prompt_parts.append("가장 적절한 번호와 간단한 근거를 답하세요.")
         prompt_parts.append("답:")
@@ -1159,9 +1181,6 @@ class MirrorPredictor:
                              ctx: Dict) -> Tuple[str, str, Dict]:
         """
         Fallback for cold-start questions.
-        
-        For violence/delinquency/aggression categories, most students answer
-        with the lowest option ("전혀 하지 않는다" / "전혀 없다").
         Use related category response levels to infer the appropriate fallback.
         """
         option_keys = sorted(options.keys())
@@ -1171,9 +1190,9 @@ class MirrorPredictor:
             category = ctx.get('category', '')
             related_cats = self._find_related_categories(question, category)
             patterns = self.ltm_data.get('temporal_patterns', {})
-            
+
             levels = []
-            for rel_cat in related_cats[:3]:
+            for rel_cat in related_cats[:5]:
                 for q, pattern in patterns.items():
                     if pattern.get('topic') == rel_cat:
                         level = self._get_response_level_from_pattern(pattern)
@@ -1190,8 +1209,9 @@ class MirrorPredictor:
                     # Related categories mostly high -> predict high
                     return option_keys[-1], "MIRROR:cold_start:fallback_high", ctx
         
-        # Default: use first option (lowest) for violence-related items
-        return option_keys[0] if option_keys else "1", "MIRROR:cold_start:fallback_first", ctx
+        # Default: use median option (neutral fallback)
+        mid_idx = len(option_keys) // 2
+        return option_keys[mid_idx] if option_keys else "1", "MIRROR:cold_start:fallback_median", ctx
     
     # Utility methods
     
