@@ -396,15 +396,35 @@ load_target_questions = get_target_questions
 def clean_llm_output(text: str) -> str:
     """Clean LLM output to extract answer number"""
     if not text: return "0"
+    # Remove thinking tags
     text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
     text = re.sub(r'<think>.*', '', text, flags=re.DOTALL).strip()
-    if text.isdigit(): return str(int(text))
-    # Match patterns like "Answer: 1", "Option 1", "답1", "1번"
-    match = re.search(r'(?:Answer|Option|답|번)[:\s]*?(\d+)', text, re.IGNORECASE)
-    if match: return str(int(match.group(1)))
-    # Fallback: find any digit
-    match = re.search(r'(\d+)', text)
-    if match: return str(int(match.group(1)))
+    # Remove student IDs (4-5 digit numbers) to prevent misparse
+    text = re.sub(r'\b\d{4,5}\b', '', text)
+    # Pure digit
+    if text.strip().isdigit() and len(text.strip()) == 1: return text.strip()
+    # Priority 1: "답: N" or "Answer: N" (highest confidence)
+    match = re.search(r'답[:\s]*([1-6])', text)
+    if match: return match.group(1)
+    match = re.search(r'[Aa]nswer[:\s]*([1-6])', text)
+    if match: return match.group(1)
+    # Priority 2: English reasoning patterns
+    for pattern in [
+        r'(?:the\s+)?answer\s+(?:is|would be|should be)[:\s]*([1-6])',
+        r'(?:I\s+)?predict[:\s]*([1-6])',
+        r'(?:I\s+)?(?:would\s+)?choose[:\s]*([1-6])',
+        r'option[:\s]*([1-6])',
+        r'select[:\s]*([1-6])',
+    ]:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match: return match.group(1)
+    # Priority 3: Last 100 chars standalone digit (likely conclusion)
+    last_part = text[-100:] if len(text) > 100 else text
+    match = re.search(r'\b([1-6])\b(?![\d])', last_part)
+    if match: return match.group(1)
+    # Priority 4: First standalone 1-6 digit
+    match = re.search(r'\b([1-6])\b', text)
+    if match: return match.group(1)
     return "0"
 
 

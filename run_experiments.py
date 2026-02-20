@@ -198,6 +198,8 @@ def run_single_method(student_id: str, method: str, targets: List[Dict],
             exclude_partial=exclude_partial,
             debug=debug
         )
+        # Pre-compute all question embeddings at once (batch)
+        predictor.precompute_embeddings([t['question'] for t in targets])
         predictions, reasons = predictor.predict_batch(targets)
     
     else:

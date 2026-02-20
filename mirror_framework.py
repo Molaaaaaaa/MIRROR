@@ -25,6 +25,7 @@ from collections import Counter
 from data_constants import (
     FREQUENCY_KEYWORDS,
     AGREEMENT_KEYWORDS,
+    RELATED_CATEGORY_PRIORITY,
 )
 
 from config import Config
@@ -237,13 +238,15 @@ class MirrorPredictor:
         ) if use_rer else None
         
         # LLM for inference (supports Ollama, OpenAI, DeepSeek)
-        self.llm = get_llm(temperature=0.0, max_tokens=250)
+        self.llm = get_llm(temperature=0.0, max_tokens=20)
         
         # Caches
         self._category_profiles = None
         self._related_categories_cache = {}
         self._narrative_cache = None
-        
+        self._embedding_cache = {}  # question -> embedding vector
+        self._patterns_by_topic = self._build_topic_index()
+
         if self.debug:
             print(f"[MIRROR] Student: {student_id}")
             print(f"[MIRROR] Components: RER={use_rer}, LTE={use_lte}, KG={use_kg}")
@@ -268,55 +271,412 @@ class MirrorPredictor:
                     return json.load(f)
         return {}
     
+    def _build_topic_index(self) -> Dict[str, list]:
+        """Pre-index temporal_patterns by topic for O(1) lookup."""
+        index = {}
+        for q, pattern in self.ltm_data.get('temporal_patterns', {}).items():
+            topic = pattern.get('topic', '')
+            if topic:
+                if topic not in index:
+                    index[topic] = []
+                index[topic].append((q, pattern))
+        return index
+
     # Retrospective Evidence Retrieval (RER)
+    def precompute_embeddings(self, questions: list):
+        """Pre-compute embeddings for all target questions at once."""
+        if not self.use_rer or not self.toolkit or not self.toolkit.vectorstore:
+            return
+        uncached = [q for q in questions if q not in self._embedding_cache]
+        if uncached:
+            embeddings = self.toolkit.embeddings.embed_documents(uncached)
+            for q, emb in zip(uncached, embeddings):
+                self._embedding_cache[q] = emb
+
     def _retrieve_evidence(self, question: str, k: int = 5) -> str:
         """
         RER: Retrieve top-K relevant Q-A-Year documents for the target question.
              E_{u,q} = R(z_q, D_u, K)
+        Paper Section 2.1: semantic search over Q-A-Year document cache.
         """
         if not self.use_rer or not self.toolkit or not self.toolkit.vectorstore:
             return ""
-        
+
         try:
-            # Retrieve more documents to account for filtered ones
-            docs = self.toolkit.vectorstore.as_retriever(
-                search_kwargs={"k": k + 3}
-            ).invoke(question)
-            
+            # Use cached embedding if available, otherwise compute
+            if question in self._embedding_cache:
+                docs = self.toolkit.vectorstore.similarity_search_by_vector(
+                    self._embedding_cache[question], k=k + 3)
+            else:
+                docs = self.toolkit.vectorstore.as_retriever(
+                    search_kwargs={"k": k + 3}
+                ).invoke(question)
+
             if not docs:
                 return ""
-            
+
             evidence_parts = []
             target_q_norm = self._normalize_for_match(question)
             target_q_core = question.split(']')[-1].strip() if ']' in question else question
             target_q_core_norm = self._normalize_for_match(target_q_core)
-            
+
             for doc in docs:
                 doc_question = doc.metadata.get('question', '')
                 doc_q_norm = self._normalize_for_match(doc_question)
                 doc_q_core = doc_question.split(']')[-1].strip() if ']' in doc_question else doc_question
                 doc_q_core_norm = self._normalize_for_match(doc_q_core)
-                
-                # Skip if same question (either full match or core match)
+
                 if doc_q_norm == target_q_norm or doc_q_core_norm == target_q_core_norm:
-                    if self.debug:
-                        print(f"[RER] Filtered self-reference: {doc_question[:30]}...")
                     continue
-                
-                content = doc.page_content
-                evidence_parts.append(content)
-                
+
+                evidence_parts.append(doc.page_content)
                 if len(evidence_parts) >= k:
                     break
-            
+
             return "\n".join(evidence_parts)
         except Exception as e:
             if self.debug:
                 print(f"[RER] Error: {e}")
             return ""
-    
+
+    def _count_stable_evidence(self, evidence_parts: list) -> int:
+        """Count how many evidence items come from stable patterns."""
+        patterns = self.ltm_data.get('temporal_patterns', {})
+        if not patterns:
+            return 0
+        count = 0
+        for part in evidence_parts:
+            if '질문:' in part:
+                q_part = part.split('질문:')[1].split('|')[0].strip() if '|' in part else part.split('질문:')[1].strip()
+                for q, pattern in patterns.items():
+                    if q_part in q or q in q_part:
+                        stab = pattern.get('stability', '')
+                        if stab in ('constant', 'highly_stable', 'stable'):
+                            count += 1
+                        break
+        return count
+
+    def _summarize_cross_category_with_stability(self, cross_cat_docs: list,
+                                                   target_category: str) -> str:
+        """
+        LTE-enhanced cross-category summary for cold-start.
+        Adds stability information to make evidence more reliable.
+        """
+        from collections import Counter
+        patterns = self.ltm_data.get('temporal_patterns', {})
+
+        low_keywords = ['전혀', '없다', '않는다', '않았다', '한 번도']
+        high_keywords = ['그런 편이다', '자주', '매우', '많이', '그렇다']
+
+        cat_info = {}  # cat -> {'levels': [], 'stable': bool}
+        for doc_info in cross_cat_docs:
+            content = doc_info['content']
+            cat = doc_info['category']
+            if '답변:' in content:
+                answer = content.split('답변:')[-1].strip()
+                if any(kw in answer for kw in low_keywords):
+                    level = '낮음'
+                elif any(kw in answer for kw in high_keywords):
+                    level = '높음'
+                else:
+                    level = '중간'
+                if cat not in cat_info:
+                    cat_info[cat] = {'levels': [], 'stable': False}
+                cat_info[cat]['levels'].append(level)
+
+        # Check stability from LTE patterns
+        if patterns:
+            for cat in cat_info:
+                stable_count = 0
+                total = 0
+                for q, pattern in patterns.items():
+                    if pattern.get('topic') == cat:
+                        total += 1
+                        stab = pattern.get('stability', '')
+                        if stab in ('constant', 'highly_stable', 'stable'):
+                            stable_count += 1
+                if total > 0 and stable_count / total >= 0.5:
+                    cat_info[cat]['stable'] = True
+
+        if not cat_info:
+            return ""
+
+        parts = ["[관련 카테고리 행동 경향 요약]"]
+        for cat, info in cat_info.items():
+            level_counts = Counter(info['levels'])
+            dominant = level_counts.most_common(1)[0][0]
+            total = len(info['levels'])
+            stab_mark = " (안정적)" if info['stable'] else ""
+            parts.append(f"- {cat}: {total}건 기록 중 '{dominant}' 수준{stab_mark}")
+        parts.append("(주의: 다른 카테고리 경향이므로 현재 문항과 직접 비교 불가)")
+        return "\n".join(parts)
+
+    def _summarize_cross_category_with_direction(self, cross_cat_docs: list,
+                                                    target_category: str) -> str:
+        """
+        RER cold-start: Summarize cross-category evidence with scale direction.
+
+        Key problem: categories have different scale directions.
+        - Positive scales (친구관계, 교사관계, 삶의만족도): high = good
+        - Negative scales (공격성, 폭력, 비행): high = bad
+        Without direction info, the model sees "친구관계: 높음" and wrongly
+        infers "폭력도 높음". With direction, it can reason correctly:
+        "친구관계(긍정) 높음 → 부정적 행동은 반대 방향 → 낮음"
+        """
+        # Categorize scales by direction
+        negative_cats = {'공격성', '우울', '학업 무기력', '사회적 위축', '주의집중',
+                         '신체증상', '비일관성', '현실비행 경험 유무 및 빈도',
+                         '사이버비행 경험 유무 및 빈도', '거부', '학교 폭력'}
+        positive_cats = {'친구관계', '교사관계', '삶의 만족도', '자아존중감', '자아탄력성',
+                         '그릿(Grit)', '학업 열의', '협동심', '구조제공', '애정'}
+
+        low_keywords = ['전혀', '없다', '않는다', '않다', '하지 않', '않은 편', '거의 없']
+        high_keywords = ['그런 편이다', '자주', '매우', '많이', '그렇다']
+
+        from collections import Counter
+        cat_info = {}
+        for doc_info in cross_cat_docs:
+            content = doc_info['content']
+            cat = doc_info['category']
+            if '답변:' in content:
+                answer = content.split('답변:')[-1].strip()
+                if any(kw in answer for kw in low_keywords):
+                    level = '낮음'
+                elif any(kw in answer for kw in high_keywords):
+                    level = '높음'
+                else:
+                    level = '중간'
+                if cat not in cat_info:
+                    cat_info[cat] = []
+                cat_info[cat].append(level)
+
+        if not cat_info:
+            return ""
+
+        # Determine target question's scale direction
+        target_is_negative = target_category in negative_cats
+
+        parts = ["[다른 카테고리 응답 기록]"]
+        for cat, levels in cat_info.items():
+            dominant = Counter(levels).most_common(1)[0][0]
+            total = len(levels)
+            # Annotate scale direction
+            if cat in positive_cats:
+                direction = "긍정 척도"
+            elif cat in negative_cats:
+                direction = "부정 척도"
+            else:
+                direction = ""
+            dir_str = f" ({direction})" if direction else ""
+            parts.append(f"- {cat}{dir_str}: {total}건 기록 중 '{dominant}' 수준")
+
+        return "\n".join(parts)
+
+    def _rerank_by_stability(self, evidence_parts: list, k: int) -> list:
+        """
+        LTE: Rerank evidence by preferring items from stable patterns.
+        Stable patterns provide more reliable reference data.
+        """
+        patterns = self.ltm_data.get('temporal_patterns', {})
+        if not patterns:
+            return evidence_parts
+
+        scored = []
+        for part in evidence_parts:
+            # Extract question from evidence format: "[year년] 질문: Q | 답변: A"
+            score = 0
+            if '질문:' in part:
+                q_part = part.split('질문:')[1].split('|')[0].strip() if '|' in part else part.split('질문:')[1].strip()
+                for q, pattern in patterns.items():
+                    if q_part in q or q in q_part:
+                        stab = pattern.get('stability', 'unknown')
+                        if stab in ('constant', 'highly_stable'):
+                            score = 2
+                        elif stab == 'stable':
+                            score = 1
+                        break
+            scored.append((score, part))
+
+        scored.sort(key=lambda x: -x[0])
+        return [part for _, part in scored[:k]]
+
+    def _summarize_cross_category_evidence(self, cross_cat_docs: list, target_category: str) -> str:
+        """
+        Summarize cross-category evidence as behavioral tendency instead of raw answers.
+        This prevents Gemma3 from being misled by different-scale answers.
+
+        Instead of: "[2022년] 질문: 공격성-화를 잘 낸다 | 답변: 그런 편이다"
+        Returns:   "관련 카테고리(공격성) 기록에서 이 학생은 대체로 낮은~중간 수준의 행동 경향을 보입니다."
+        """
+        from collections import Counter
+
+        # Parse answer levels from cross-category docs
+        cat_answers = {}  # category -> list of (question_summary, answer_level)
+
+        low_keywords = ['전혀', '없다', '않는다', '않았다', '한 번도']
+        mid_keywords = ['그렇지 않은', '가끔', '별로']
+        high_keywords = ['그런 편이다', '자주', '매우', '많이', '그렇다']
+
+        for doc_info in cross_cat_docs:
+            content = doc_info['content']
+            cat = doc_info['category']
+
+            # Extract answer from content format: "[year년] 질문: ... | 답변: ..."
+            if '답변:' in content:
+                answer = content.split('답변:')[-1].strip()
+                if any(kw in answer for kw in low_keywords):
+                    level = '낮음'
+                elif any(kw in answer for kw in high_keywords):
+                    level = '높음'
+                else:
+                    level = '중간'
+
+                if cat not in cat_answers:
+                    cat_answers[cat] = []
+                cat_answers[cat].append(level)
+
+        if not cat_answers:
+            return ""
+
+        # Build summary
+        parts = ["[관련 카테고리 행동 경향 요약]"]
+        for cat, levels in cat_answers.items():
+            level_counts = Counter(levels)
+            dominant = level_counts.most_common(1)[0][0]
+            total = len(levels)
+            parts.append(f"- {cat}: {total}건 기록 중 대체로 '{dominant}' 수준")
+
+        parts.append("(주의: 위는 다른 카테고리의 경향이므로 현재 문항의 척도와 직접 비교하지 마세요)")
+        return "\n".join(parts)
+
+    def _get_simple_related_summary(self, target_category: str) -> str:
+        """
+        RER cold-start: Get simple summary of related category responses.
+        No KG needed — uses RELATED_CATEGORY_PRIORITY and raw history.
+
+        Returns: concise behavior level summary from related categories.
+        """
+        if not RELATED_CATEGORY_PRIORITY:
+            return ""
+
+        # Check multiple related categories for a fuller picture
+        all_values = []
+        cat_used = None
+        for rel_cat in RELATED_CATEGORY_PRIORITY[:3]:
+            last_values = []
+            for year in sorted(self.history.keys(), reverse=True):
+                if int(year) >= Config.TARGET_YEAR:
+                    continue
+                for q, v in self.history[year].items():
+                    q_cat = extract_category(q)
+                    if q_cat == rel_cat and v:
+                        last_values.append(v)
+                if last_values:
+                    break
+            if last_values:
+                all_values.extend(last_values)
+                if cat_used is None:
+                    cat_used = rel_cat
+
+        if not all_values:
+            return ""
+
+        # Count low-level responses across all related categories
+        low_keywords = ['전혀', '없다', '않는다', '않다', '하지 않', '않은 편', '거의 없', '거의 하지']
+        low_count = sum(1 for v in all_values if any(kw in v for kw in low_keywords))
+        low_ratio = low_count / len(all_values)
+
+        if low_ratio >= 0.7:
+            return f"[참고] 이 학생은 관련 행동({cat_used} 등) 항목에서 대부분 낮은 수준으로 응답함"
+        elif low_ratio >= 0.4:
+            return f"[참고] 이 학생은 관련 행동 항목에서 낮은~중간 수준으로 응답함"
+        else:
+            mode_val = Counter(all_values).most_common(1)[0]
+            return f"[참고] 이 학생의 관련 행동({cat_used}) 최빈 응답: '{mode_val[0]}'"
+
+    def _summarize_cross_category_concise(self, cross_cat_docs: list) -> str:
+        """
+        RER cold-start: Show representative Q-A pairs per category.
+        Uses original answer text (not abstracted levels) to avoid
+        misleading the LLM with wrong high/low classification.
+        Limits to 1 representative per category, max 3 categories.
+        """
+        cat_examples = {}  # cat -> first (question_short, answer) pair
+        for doc_info in cross_cat_docs:
+            content = doc_info['content']
+            cat = doc_info['category']
+            if cat in cat_examples:
+                continue  # one per category
+            if '질문:' in content and '답변:' in content:
+                q_part = content.split('질문:')[1].split('|')[0].strip()
+                # Remove category prefix from question
+                if ']-' in q_part:
+                    q_part = q_part.split(']-')[1].strip()
+                elif '-' in q_part:
+                    q_part = q_part.split('-', 1)[1].strip() if q_part.startswith('[') else q_part
+                answer = content.split('답변:')[-1].strip()
+                cat_examples[cat] = (q_part[:40], answer)
+            if len(cat_examples) >= 3:
+                break
+
+        if not cat_examples:
+            return ""
+
+        parts = []
+        for cat, (q_short, ans) in cat_examples.items():
+            parts.append(f"- [{cat}] {q_short} → {ans}")
+        return "\n".join(parts)
+
+    def _get_concise_lte_tendency(self, ctx: Dict) -> str:
+        """
+        Ultra-concise LTE contribution for cold-start: ONE line about student tendency.
+        Uses narrative + domain profiles to determine if student shows
+        high/low risk behavior pattern overall.
+        """
+        if not self.use_lte:
+            return ""
+
+        # Check domain profiles for negative behavior domains
+        profiles = self.ltm_data.get('thematic_profiles', {})
+        neg_domains = ['공격성', '현실비행 경험 유무 및 빈도']
+        risk_level = "low"
+
+        for domain in neg_domains:
+            if domain in profiles:
+                prof = profiles[domain]
+                stab_score = prof.get('stability_score', 0.5)
+                # Check if the student shows high levels in negative domains
+                level = prof.get('overall_level', '')
+                if level in ['high', '높음']:
+                    risk_level = "high"
+                    break
+                elif level in ['mid', '중간']:
+                    risk_level = "mid"
+
+        # Also check from temporal patterns
+        if risk_level == "low":
+            patterns = self.ltm_data.get('temporal_patterns', {})
+            high_count = 0
+            total_neg = 0
+            for q, pattern in patterns.items():
+                topic = pattern.get('topic', '')
+                if topic in neg_domains:
+                    total_neg += 1
+                    level = self._get_response_level_from_pattern(pattern)
+                    if level == "high":
+                        high_count += 1
+            if total_neg > 0 and high_count / total_neg > 0.3:
+                risk_level = "mid"
+
+        if risk_level == "high":
+            return "[LTE] 이 학생의 전반적 부정적 행동 경향: 높음"
+        elif risk_level == "mid":
+            return "[LTE] 이 학생의 전반적 부정적 행동 경향: 중간"
+        else:
+            return "[LTE] 이 학생의 전반적 부정적 행동 경향: 낮음"
+
     # Longitudinal Trend Extraction (LTE)
-    
+
     def _get_static_persona(self) -> str:
         """P^static_u: Demographics and stable traits"""
         if not self.use_lte:
@@ -543,7 +903,82 @@ class MirrorPredictor:
         if context_parts:
             return "[관련 카테고리 상관관계]\n" + "\n".join(context_parts)
         return ""
-    
+
+    def _get_concise_kg_correlation(self, question: str, category: str) -> str:
+        """
+        Ultra-concise KG contribution for existing questions: ONE line only.
+        Returns correlation direction and related category's response level.
+        Designed for Gemma3 12B which gets confused by verbose context.
+        """
+        if not self.use_kg:
+            return ""
+
+        related_cats = self._find_related_categories(question, category)
+        if not related_cats:
+            return ""
+
+        primary_cat = related_cats[0]
+        corr_val = self._extract_correlation_value(category, primary_cat)
+
+        # Get related category's response level from raw history or LTM
+        level = self._get_related_cat_level(primary_cat)
+        if not level:
+            return ""
+
+        if corr_val is not None and corr_val > 0:
+            return f"[KG] {primary_cat}({level}) → 유사한 응답 수준 예상"
+        elif corr_val is not None and corr_val < 0:
+            return f"[KG] {primary_cat}({level}) → 반대 응답 수준 예상"
+        else:
+            return f"[KG] 관련 카테고리 {primary_cat}: {level} 수준"
+
+    def _get_related_cat_level(self, category: str) -> str:
+        """Get the response level for a category from LTM data or raw history."""
+        last_values = []
+
+        # Try LTM data first
+        patterns = self.ltm_data.get('temporal_patterns', {})
+        if patterns:
+            for q, pattern in patterns.items():
+                if pattern.get('topic') == category:
+                    lv = pattern.get('last_value', '')
+                    if lv:
+                        last_values.append(lv)
+
+        # Fallback: raw history (most recent year)
+        if not last_values:
+            for year in sorted(self.history.keys(), reverse=True):
+                if int(year) >= Config.TARGET_YEAR:
+                    continue
+                for q, v in self.history[year].items():
+                    q_cat = extract_category(q)
+                    if q_cat == category and v:
+                        last_values.append(v)
+                if last_values:
+                    break
+
+        if not last_values:
+            return ""
+
+        mode_val = Counter(last_values).most_common(1)[0][0]
+        return self._classify_response_level(mode_val)
+
+    def _classify_response_level(self, value_text: str) -> str:
+        """Classify a response value text into low/mid/high level."""
+        if not value_text:
+            return "mid"
+        # Low: clear negation or absence
+        low_keywords = ['전혀', '없다', '않는다', '않다', '하지 않', '않은 편', '거의 없', '거의 하지']
+        # High: clear affirmation or frequency
+        high_keywords = ['매우', '자주', '항상', '많이', '그런 편이다', '그렇다']
+        for kw in low_keywords:
+            if kw in value_text:
+                return "low"
+        for kw in high_keywords:
+            if kw in value_text:
+                return "high"
+        return "mid"
+
     def _get_response_level_from_pattern(self, pattern: Dict) -> str:
         """Determine response level (low/mid/high) from temporal pattern."""
         trend = pattern.get('trend') if pattern else None
@@ -598,18 +1033,17 @@ class MirrorPredictor:
         for rel_cat in related_cats[:top_k]:
             corr_info = self._get_correlation_info(category, rel_cat)
 
-            # Collect response statistics (Stability, Mode) for this category
+            # Collect response statistics (Stability, Mode) using topic index
             last_values = []
             stabilities = []
-            if patterns:
-                for q, pattern in patterns.items():
-                    if pattern.get('topic') == rel_cat:
-                        last_val = pattern.get('last_value', '')
-                        stability = pattern.get('stability', '')
-                        if last_val:
-                            last_values.append(last_val)
-                        if stability:
-                            stabilities.append(stability)
+            if self.use_lte:
+                for q, pattern in self._patterns_by_topic.get(rel_cat, []):
+                    last_val = pattern.get('last_value', '')
+                    stability = pattern.get('stability', '')
+                    if last_val:
+                        last_values.append(last_val)
+                    if stability:
+                        stabilities.append(stability)
 
             if last_values:
                 # Mode (most frequent response) - Paper Section 2.4
@@ -633,7 +1067,179 @@ class MirrorPredictor:
         if context_parts:
             return "[관련 카테고리 응답 통계]\n" + "\n".join(context_parts)
         return ""
-    
+
+    def _get_category_summaries(self, related_cats: List[str]) -> List[str]:
+        """
+        Get category summaries (Mode, Stability) for cold-start prediction.
+        Paper Figure 7: category_summaries section.
+        """
+        summaries = []
+        profiles = self.ltm_data.get('thematic_profiles', {})
+        patterns = self.ltm_data.get('temporal_patterns', {})
+
+        for cat in related_cats[:3]:
+            if cat not in profiles:
+                continue
+
+            prof = profiles[cat]
+            stab_score = prof.get('stability_score', 0.5)
+
+            if stab_score >= 0.8:
+                stab_desc = "highly_stable"
+            elif stab_score >= 0.6:
+                stab_desc = "stable"
+            else:
+                stab_desc = "variable"
+
+            # Find mode value for this category
+            mode_values = []
+            for q, p in patterns.items():
+                if p.get('topic') == cat:
+                    mode_values.append(p.get('mode', ''))
+
+            if mode_values:
+                mode_counter = Counter(mode_values)
+                common_mode = mode_counter.most_common(1)[0][0]
+                summaries.append(f"- [{cat}] {stab_desc}, Mode: '{common_mode}'")
+            else:
+                summaries.append(f"- [{cat}] {stab_desc}")
+
+        return summaries
+
+    def _get_strong_correlations(self, category: str) -> List[str]:
+        """
+        Get strong correlations for cold-start prediction.
+        Paper Figure 7: strong_correlations section with explicit interpretation.
+        Falls back to semantic similarity when behavioral data is missing.
+        """
+        correlations = []
+        corr_data = _load_behavioral_correlation()
+
+        relationships = corr_data.get('category_relationships', {}) if corr_data else {}
+
+        if category in relationships:
+            for item in relationships[category][:3]:
+                if isinstance(item, (list, tuple)) and len(item) >= 2:
+                    corr_cat, corr_val = item[0], item[1]
+                    direction = "positive" if corr_val > 0 else "negative"
+                    strength = "strong" if abs(corr_val) >= 0.5 else "moderate"
+
+                    if corr_val > 0:
+                        interp = f"high '{corr_cat}' -> high '{category}'"
+                    else:
+                        interp = f"high '{corr_cat}' -> low '{category}'"
+
+                    correlations.append(
+                        f"- '{category}' <-> '{corr_cat}' (Corr: {corr_val:+.2f}, {strength} {direction}): {interp}"
+                    )
+        else:
+            # Fallback: use semantic similarity for cold-start categories
+            sim_data = _load_category_similarity()
+            if sim_data:
+                sim_rels = sim_data.get('category_relationships', {}).get(category, [])
+                for item in sim_rels[:3]:
+                    if isinstance(item, (list, tuple)) and len(item) >= 2:
+                        sim_cat, sim_val = item[0], item[1]
+                        # Semantic similarity implies positive correlation
+                        interp = f"similar to '{sim_cat}' -> expect similar response level"
+                        correlations.append(
+                            f"- '{category}' ~ '{sim_cat}' (Similarity: {sim_val:.2f}): {interp}"
+                        )
+
+        return correlations
+
+    def _get_2022_sudden_changes(self, category: str, related_cats: List[str]) -> List[str]:
+        """
+        Get 2022 sudden changes in target and related categories.
+        Paper Figure 7: sudden_changes section.
+        """
+        changes = []
+        target_cats = [category] + related_cats
+
+        for q, shift in self.ltm_data.get('sudden_shifts', {}).items():
+            if shift.get('year') == 2022:
+                q_cat = extract_category(q)
+                if q_cat in target_cats:
+                    z_score = shift.get('z_score', 'N/A')
+                    z_str = f"Z-score: {z_score}" if isinstance(z_score, (int, float)) else ""
+                    changes.append(
+                        f"- [{q_cat}] {shift.get('from_value', '')} -> {shift.get('to_value', '')} {z_str}"
+                    )
+
+        return changes[:5]
+
+    def _infer_cold_start_level(self, question: str, category: str,
+                                options: Dict[str, str]) -> str:
+        """
+        KG-based response level inference for cold-start questions.
+        Paper Section 2.4: Uses KG correlation edges to identify related categories
+        and provide their response statistics as alternative context.
+
+        Key design: Instead of providing raw response level (which misleads the LLM
+        for negative-behavior items), provide:
+        1. The correlation relationship (which category is related)
+        2. Whether this student's pattern is low/typical (aligns with majority)
+           or high (potential outlier)
+        3. The option 1 frequency in related category (concrete statistic)
+
+        This gives the LLM useful structural information without misleading it.
+        """
+        if not self.use_kg:
+            return ""
+
+        related_cats = self._find_related_categories(question, category)
+        if not related_cats:
+            return ""
+
+        # Use the most similar category (first one from KG)
+        primary_cat = related_cats[0]
+
+        # Get correlation value if available
+        corr_val = self._extract_correlation_value(category, primary_cat)
+
+        # Collect response values for the related category
+        last_values = []
+
+        # Try LTM temporal patterns first (available when use_lte=True)
+        patterns = self.ltm_data.get('temporal_patterns', {})
+        if patterns:
+            for q, pattern in patterns.items():
+                if pattern.get('topic') == primary_cat:
+                    lv = pattern.get('last_value', '')
+                    if lv:
+                        last_values.append(lv)
+
+        # Fallback: use raw history data (works even without LTE)
+        if not last_values:
+            for year in sorted(self.history.keys(), reverse=True):
+                if int(year) >= Config.TARGET_YEAR:
+                    continue
+                for q, v in self.history[year].items():
+                    q_cat = extract_category(q)
+                    if q_cat == primary_cat and v:
+                        last_values.append(v)
+                if last_values:
+                    break  # Use most recent year's data
+
+        if not last_values:
+            return ""
+
+        # Count how many responses are option 1 (lowest) in the related category
+        low_keywords = ['전혀', '없다', '않는다', '않다', '하지 않', '않은 편', '거의 없', '거의 하지']
+        option1_count = 0
+        for v in last_values:
+            if any(kw in v for kw in low_keywords):
+                option1_count += 1
+        option1_ratio = option1_count / len(last_values) if last_values else 0
+
+        # Build KG context: correlation + student's related-category pattern
+        parts = [f"[KG 분석] 관련 카테고리: {primary_cat}"]
+        if corr_val is not None:
+            parts.append(f"상관계수: r={corr_val:.2f} (양의 상관: 유사한 응답 경향)")
+        parts.append(f"이 학생의 {primary_cat} 응답 중 최저 수준 비율: {option1_ratio:.0%} ({option1_count}/{len(last_values)}건)")
+
+        return "\n".join(parts)
+
     def _get_pattern_description(self, question: str) -> str:
         """
         Get compact pattern description combining stability, level, and trend.
@@ -914,110 +1520,52 @@ class MirrorPredictor:
                           ctx: Dict) -> Tuple[str, str, Dict]:
         """
         Prediction for existing questions (has history).
-
-        Component isolation for ablation (following paper Table 5):
-        - Base (always): raw history trace (LLM-only baseline)
-        - +RER: semantic evidence retrieval from other questions
-        - +LTE: enriched persona (static, narrative, stability, domain profile, change warning)
-        - +KG: consistency constraints and related category correlations
+        Paper: ŷ = g(q, Y_q, E_{u,q}, P_{u,q}, C_q)
         """
-        option_type = detect_option_type(options)
-        option_type_desc = get_option_type_description(option_type)
         options_str = "\n".join([f"{k}. {v}" for k, v in options.items()])
 
-        # Get compact pattern description (LTE)
-        pattern_desc = self._get_pattern_description(question) if self.use_lte else ""
-
-        # Get related category detail with item-level patterns (KG+LTE)
-        related_detail = ""
-        if self.use_kg:
-            related_detail = self._get_related_category_detail(question, ctx['category'])
-
-        # Build compact prompt matching paper structure structure
         prompt_parts = []
-        prompt_parts.append("이 학생의 시계열 데이터를 분석하여 2023년 응답을 예측하세요.")
-        prompt_parts.append("")
+        prompt_parts.append("학생의 과거 응답 추세를 이어서 2023년 응답을 예측하세요. 번호만 출력하세요.")
 
-        # [LTE] P^static: Student demographics
+        # [LTE] P^static + narrative
         if ctx['static_persona']:
-            prompt_parts.append(f"[학생 기본 정보] {ctx['static_persona']}")
-            prompt_parts.append("")
-
-        # [LTE] Student overview (narrative)
+            prompt_parts.append(ctx['static_persona'])
         if ctx['narrative']:
-            narrative_short = ctx['narrative'][:200].replace('\n', ' ')
-            prompt_parts.append("[학생 개요]")
-            prompt_parts.append(narrative_short)
-            prompt_parts.append("")
-
-        # [LTE] Change warning (placed at top of prompt, before time-series)
+            prompt_parts.append(ctx['narrative'][:150])
         if ctx['change_warning']:
             prompt_parts.append(ctx['change_warning'])
-            prompt_parts.append("")
 
-        # [BASE + LTE] Time-series trace with pattern description
-        prompt_parts.append("[이 문항의 시계열 (2018-2022)]")
+        # [BASE] Y_q: Time-series trace (always provided)
         if ctx['base_yearly_trace']:
             prompt_parts.append(ctx['base_yearly_trace'])
-        else:
-            prompt_parts.append("정보 없음")
-        if pattern_desc:
-            prompt_parts.append(f"패턴 특성: {pattern_desc}")
-        elif ctx['stability']:
-            prompt_parts.append(f"패턴 안정성: {ctx['stability']}")
-        prompt_parts.append("")
 
-        # [KG+LTE] Related category detail (item-level patterns)
-        if related_detail:
-            prompt_parts.append(related_detail)
-            prompt_parts.append("")
-        elif ctx['related_context']:
-            prompt_parts.append(ctx['related_context'])
-            prompt_parts.append("")
+        # [LTE] Pattern description
+        if self.use_lte:
+            pattern_desc = self._get_pattern_description(question)
+            if pattern_desc:
+                prompt_parts.append(pattern_desc)
 
-        # [KG] Consistency constraints (complementary correlation info)
-        if ctx['kg_constraints'] and not related_detail:
-            prompt_parts.append(ctx['kg_constraints'])
-            prompt_parts.append("")
-
-        # [LTE] Domain profile (category-level trend context)
-        if ctx['domain_profile']:
-            prompt_parts.append(ctx['domain_profile'])
-            prompt_parts.append("")
+        # [KG] Related category detail (Mode/Stability)
+        if self.use_kg:
+            related_detail = self._get_related_category_detail(question, ctx['category'])
+            if related_detail:
+                prompt_parts.append(related_detail)
 
         # [RER] Retrieved evidence
         if ctx['evidence']:
-            prompt_parts.append("[관련 기록]")
-            prompt_parts.append(ctx['evidence'][:500])
-            prompt_parts.append("")
+            prompt_parts.append(ctx['evidence'][:300])
 
-        # [KG] Valid option range constraint
+        # [KG] Valid option range
         if ctx.get('kg_valid_options'):
             prompt_parts.append(ctx['kg_valid_options'])
-            prompt_parts.append("")
 
-        # Target question and options
-        prompt_parts.append("[예측 대상]")
+        # Question + answer
         prompt_parts.append(f"질문: {question}")
-        prompt_parts.append("")
-        prompt_parts.append("[선택지]")
         prompt_parts.append(options_str)
-        if option_type_desc:
-            prompt_parts.append(f"({option_type_desc})")
-        prompt_parts.append("")
-
-        # Compact instructions matching paper structure
-        prompt_parts.append("[추론 지침]")
-        prompt_parts.append("1. 시계열 패턴의 안정성과 응답 수준(low/mid/high)을 고려하세요")
-        prompt_parts.append("2. 급변이 있다면 변화 지속 vs 이전 패턴 회귀를 판단하세요")
-        prompt_parts.append("3. 관련 카테고리와의 상관관계 방향을 참고하세요")
-
-        prompt_parts.append("")
-        prompt_parts.append("가장 적절한 번호와 간단한 근거를 답하세요.")
         prompt_parts.append("답:")
-        
+
         prompt = "\n".join(prompt_parts)
-        
+
         try:
             response = self.llm.invoke(prompt)
             pred = clean_llm_output(response.content)
@@ -1041,96 +1589,72 @@ class MirrorPredictor:
         # Fallback (respects component flags)
         return self._fallback_prediction(question, options, ctx)
 
+    def _get_related_category_traces(self, n_cats: int = 2, n_traces: int = 5) -> list:
+        """
+        RER cold-start: Get raw answer traces from related categories.
+        Returns list of formatted trace strings (e.g., "2022년 [공격성]: 그렇지 않은 편이다").
+        """
+        traces = []
+        for rel_cat in RELATED_CATEGORY_PRIORITY[:n_cats]:
+            cat_traces = []
+            for year in sorted(self.history.keys(), reverse=True):
+                if int(year) >= Config.TARGET_YEAR:
+                    continue
+                for q, v in self.history[year].items():
+                    if extract_category(q) == rel_cat and v:
+                        cat_traces.append(f"{year}년 [{rel_cat}]: {v}")
+                if cat_traces:
+                    break
+            traces.extend(cat_traces[:n_traces])
+        return traces
+
     def _predict_cold_start(self, question: str, options: Dict[str, str],
                             ctx: Dict) -> Tuple[str, str, Dict]:
         """
         Prediction for cold-start questions (no history).
+        Paper: ŷ = g(q, E_{u,q}, P_{u,q}, C_q)
 
-        Relies more heavily on:
-        - E_{u,q}: Retrieved evidence from other questions (RER)
-        - P_u: Overall narrative and domain profile (LTE)
-        - C_q: KG constraints + related category statistics (KG)
-        - Related category detail: item-level response patterns (KG+LTE)
-
-        Cold-start has no item-level history, so all other signals are
-        given more context space to compensate.
+        Cold-start strategy: Use raw traces from related categories as
+        pseudo-history. The LLM infers the response level from related
+        behavioral patterns, formatted like existing question prompts.
         """
-        option_type = detect_option_type(options)
-        option_type_desc = get_option_type_description(option_type)
         options_str = "\n".join([f"{k}. {v}" for k, v in options.items()])
 
-        # Get detailed related category context (KG+LTE combined)
-        # Cold-start uses top 5 related categories for richer cross-domain signal
-        related_detail = self._get_related_category_detail(question, ctx['category'], top_k=5)
-
-        # Build prompt
         prompt_parts = []
-        prompt_parts.append("이 학생의 2018-2022년 종단 데이터를 분석하여 2023년 응답을 예측하세요.")
-        prompt_parts.append("(주의: 이 문항은 과거 기록이 없는 신규 문항입니다. 관련 카테고리 데이터를 활용하세요)")
-        prompt_parts.append("")
 
-        # [LTE] P^static: Student demographics
+        # [LTE] P^static + narrative (when available)
         if ctx['static_persona']:
-            prompt_parts.append(f"[학생 기본 정보] {ctx['static_persona']}")
-            prompt_parts.append("")
-
-        # [LTE] P_u: Narrative (more context for cold-start)
+            prompt_parts.append(ctx['static_persona'])
         if ctx['narrative']:
-            narrative_short = ctx['narrative'][:500].replace('\n', ' ')
-            prompt_parts.append(f"[학생 성장 서사]")
-            prompt_parts.append(narrative_short)
-            prompt_parts.append("")
+            prompt_parts.append(ctx['narrative'][:150])
 
-        # [LTE] Domain profile (critical for cold-start: domain-level trend)
+        # [KG] Related category detail (Mode/Stability) from KG
+        if self.use_kg:
+            related_detail = self._get_related_category_detail(question, ctx['category'])
+            if related_detail:
+                prompt_parts.append(related_detail)
+            elif ctx['kg_constraints']:
+                prompt_parts.append(ctx['kg_constraints'])
+
+        # [RER] Core: Related category traces as pseudo-history
+        # Raw traces from related categories give the LLM direct behavioral data
+        # to infer the student's likely response level for the new domain.
+        traces = self._get_related_category_traces(n_cats=2, n_traces=5)
+        if traces:
+            prompt_parts.extend(traces[:5])
+
+        # [LTE] Domain profile
         if ctx['domain_profile']:
             prompt_parts.append(ctx['domain_profile'])
-            prompt_parts.append("")
 
-        # [KG+LTE] Related category detail with item-level patterns
-        if related_detail:
-            prompt_parts.append(related_detail)
-            prompt_parts.append("")
-
-        # [KG] Consistency constraints (complementary to related_detail)
-        if ctx['kg_constraints']:
-            prompt_parts.append(ctx['kg_constraints'])
-            prompt_parts.append("")
-
-        # [KG] Related category correlation context
-        if ctx['related_context'] and not related_detail:
-            prompt_parts.append(ctx['related_context'])
-            prompt_parts.append("")
-
-        # [RER] E_{u,q}: Retrieved evidence (more context for cold-start)
-        if ctx['evidence']:
-            prompt_parts.append("[검색된 관련 기록]")
-            prompt_parts.append(ctx['evidence'][:600])
-            prompt_parts.append("")
-
-        # [KG] Valid option range constraint
+        # [KG] Valid option range
         if ctx.get('kg_valid_options'):
             prompt_parts.append(ctx['kg_valid_options'])
-            prompt_parts.append("")
 
-        # Target question
-        prompt_parts.append("[예측 대상]")
-        prompt_parts.append(f"카테고리: {ctx['category']}")
+        # Instruction + question (same style as existing question prompts)
+        prompt_parts.append("학생의 과거 응답 추세를 이어서 2023년 응답을 예측하세요. 번호만 출력하세요.")
         prompt_parts.append(f"질문: {question}")
-        prompt_parts.append("")
-        prompt_parts.append("[선택지]")
         prompt_parts.append(options_str)
-        if option_type_desc:
-            prompt_parts.append(f"({option_type_desc})")
-        prompt_parts.append("")
-
-        # Instructions (enhanced for cold-start reasoning)
-        prompt_parts.append("[추론 지침]")
-        prompt_parts.append("1. 관련 카테고리의 응답 통계(Mode, Stability)를 참고하세요")
-        prompt_parts.append("2. 상관관계 방향을 고려하세요 (양의 상관: 유사한 수준, 음의 상관: 반대 수준)")
-        prompt_parts.append("3. 학생의 전반적인 성향과 발달 궤적을 고려하세요")
-        prompt_parts.append("4. 도메인 프로필의 안정성과 추세를 고려하세요")
-        prompt_parts.append("")
-        prompt_parts.append("가장 적절한 번호와 간단한 근거를 답하세요.")
         prompt_parts.append("답:")
 
         prompt = "\n".join(prompt_parts)
@@ -1184,37 +1708,58 @@ class MirrorPredictor:
         Use related category response levels to infer the appropriate fallback.
         """
         option_keys = sorted(options.keys())
-        
-        # If LTE is available, check related category response levels
-        if self.use_lte and self.use_kg:
-            category = ctx.get('category', '')
-            related_cats = self._find_related_categories(question, category)
-            patterns = self.ltm_data.get('temporal_patterns', {})
 
+        # Check related category response levels from raw history
+        # This works for ALL configurations (RER-only, RER+LTE, RER+KG, MIRROR)
+        category = ctx.get('category', '')
+
+        # Method 1: LTE temporal patterns (richest data)
+        if self.use_lte:
+            related_cats = self._find_related_categories(question, category)
             levels = []
             for rel_cat in related_cats[:5]:
-                for q, pattern in patterns.items():
-                    if pattern.get('topic') == rel_cat:
-                        level = self._get_response_level_from_pattern(pattern)
-                        levels.append(level)
-            
+                for q, pattern in self._patterns_by_topic.get(rel_cat, []):
+                    level = self._get_response_level_from_pattern(pattern)
+                    levels.append(level)
+
             if levels:
                 low_count = levels.count('low')
                 high_count = levels.count('high')
-                
+
                 if low_count > high_count:
-                    # Related categories mostly low -> predict low (option 1)
                     return option_keys[0], "MIRROR:cold_start:fallback_low", ctx
                 elif high_count > low_count:
-                    # Related categories mostly high -> predict high
                     return option_keys[-1], "MIRROR:cold_start:fallback_high", ctx
-        
-        # Default: use median option (neutral fallback)
+
+        # Method 2: Raw history from related categories (works for RER-only)
+        if RELATED_CATEGORY_PRIORITY:
+            low_keywords = ['전혀', '없다', '않는다', '않다', '하지 않', '않은 편', '거의 없', '거의 하지']
+            all_values = []
+            for rel_cat in RELATED_CATEGORY_PRIORITY[:3]:
+                for year in sorted(self.history.keys(), reverse=True):
+                    if int(year) >= Config.TARGET_YEAR:
+                        continue
+                    for q, v in self.history[year].items():
+                        if extract_category(q) == rel_cat and v:
+                            all_values.append(v)
+                    if all_values:
+                        break
+
+            if all_values:
+                low_count = sum(1 for v in all_values if any(kw in v for kw in low_keywords))
+                low_ratio = low_count / len(all_values)
+                if low_ratio >= 0.5:
+                    return option_keys[0], "MIRROR:cold_start:fallback_low", ctx
+
+        # Default: use first option (lowest) for frequency scales, median otherwise
+        option_type = detect_option_type(options)
+        if option_type == 'frequency':
+            return option_keys[0], "MIRROR:cold_start:fallback_freq_low", ctx
         mid_idx = len(option_keys) // 2
         return option_keys[mid_idx] if option_keys else "1", "MIRROR:cold_start:fallback_median", ctx
     
     # Utility methods
-    
+
     def _normalize_for_match(self, text: str) -> str:
         if not text:
             return ""
@@ -1289,20 +1834,124 @@ class MirrorPredictor:
         
         return "0"
     
+    def _build_prompt(self, question: str, options: Dict[str, str]) -> Tuple[str, Dict]:
+        """Build prompt string and context for a question (no LLM call)."""
+        ctx = self._build_context(question, options)
+        options_str = "\n".join([f"{k}. {v}" for k, v in options.items()])
+
+        if ctx['is_new_question']:
+            prompt_parts = []
+            # [LTE] P^static + narrative
+            if ctx['static_persona']:
+                prompt_parts.append(ctx['static_persona'])
+            if ctx['narrative']:
+                prompt_parts.append(ctx['narrative'][:150])
+            # [KG] Related category detail
+            if self.use_kg:
+                related_detail = self._get_related_category_detail(question, ctx['category'])
+                if related_detail:
+                    prompt_parts.append(related_detail)
+                elif ctx['kg_constraints']:
+                    prompt_parts.append(ctx['kg_constraints'])
+            # [RER] Core: Related category traces as pseudo-history
+            traces = self._get_related_category_traces(n_cats=2, n_traces=5)
+            if traces:
+                prompt_parts.extend(traces[:5])
+            # [LTE] Domain profile
+            if ctx['domain_profile']:
+                prompt_parts.append(ctx['domain_profile'])
+            if ctx.get('kg_valid_options'):
+                prompt_parts.append(ctx['kg_valid_options'])
+            # Instruction (same style as existing question prompts)
+            prompt_parts.append("학생의 과거 응답 추세를 이어서 2023년 응답을 예측하세요. 번호만 출력하세요.")
+            prompt_parts.append(f"질문: {question}")
+            prompt_parts.append(options_str)
+            prompt_parts.append("답:")
+        else:
+            prompt_parts = []
+            # Task instruction for existing questions
+            prompt_parts.append("학생의 과거 응답 추세를 이어서 2023년 응답을 예측하세요. 번호만 출력하세요.")
+            if ctx['static_persona']:
+                prompt_parts.append(ctx['static_persona'])
+            if ctx['narrative']:
+                prompt_parts.append(ctx['narrative'][:150])
+            if ctx['change_warning']:
+                prompt_parts.append(ctx['change_warning'])
+            if ctx['base_yearly_trace']:
+                prompt_parts.append(ctx['base_yearly_trace'])
+            if self.use_lte:
+                pattern_desc = self._get_pattern_description(question)
+                if pattern_desc:
+                    prompt_parts.append(pattern_desc)
+            if self.use_kg:
+                related_detail = self._get_related_category_detail(question, ctx['category'])
+                if related_detail:
+                    prompt_parts.append(related_detail)
+            if ctx['evidence']:
+                prompt_parts.append(ctx['evidence'][:300])
+            if ctx.get('kg_valid_options'):
+                prompt_parts.append(ctx['kg_valid_options'])
+            prompt_parts.append(f"질문: {question}")
+            prompt_parts.append(options_str)
+            prompt_parts.append("답:")
+
+        return "\n".join(prompt_parts), ctx
+
     def predict_batch(self, tasks: List[Dict], verbose: bool = False) -> Tuple[List[str], List[str]]:
+        import concurrent.futures
         from tqdm import tqdm
-        preds, reasons = [], []
 
         desc = f"[MIRROR] {self.student_id} (RER={self.use_rer},LTE={self.use_lte},KG={self.use_kg})"
-        for task in tqdm(tasks, desc=desc, leave=False):
-            pred, reason, ctx = self.predict(task['question'], task['options'])
-            preds.append(pred)
-            # Include explanation from LLM response (paper Figure 2)
-            explanation = ctx.get('explanation', '')
-            if explanation:
-                reasons.append(f"{reason} | {explanation}")
+
+        # Phase 1: Build all prompts (CPU, fast)
+        prompts = []
+        contexts = []
+        for task in tasks:
+            prompt, ctx = self._build_prompt(task['question'], task['options'])
+            prompts.append(prompt)
+            contexts.append(ctx)
+
+        # Phase 2: Send all LLM requests concurrently
+        def call_llm(idx):
+            try:
+                response = self.llm.invoke(prompts[idx])
+                return idx, response.content
+            except Exception as e:
+                return idx, ""
+
+        results = [""] * len(tasks)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            futures = {executor.submit(call_llm, i): i for i in range(len(tasks))}
+            for future in tqdm(concurrent.futures.as_completed(futures),
+                             total=len(tasks), desc=desc, leave=False):
+                idx, content = future.result()
+                results[idx] = content
+
+        # Phase 3: Parse results
+        preds, reasons = [], []
+        for i, task in enumerate(tasks):
+            ctx = contexts[i]
+            content = results[i]
+            pred = clean_llm_output(content)
+            ctx['explanation'] = content.strip()
+
+            if pred != "0" and pred in task['options']:
+                if ctx['is_new_question']:
+                    reason = f"MIRROR:cold_start:{ctx['category']}"
+                else:
+                    reason = f"MIRROR:existing:{ctx['stability'] or 'unknown'}"
             else:
-                reasons.append(reason)
+                # Fallback
+                if ctx['is_new_question']:
+                    pred, reason, ctx = self._fallback_cold_start(
+                        task['question'], task['options'], ctx)
+                else:
+                    pred, reason, ctx = self._fallback_prediction(
+                        task['question'], task['options'], ctx)
+
+            preds.append(pred)
+            explanation = ctx.get('explanation', '')
+            reasons.append(f"{reason} | {explanation}" if explanation else reason)
 
         return preds, reasons
 

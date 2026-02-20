@@ -27,7 +27,7 @@ def get_embeddings():
     if _EMBEDDINGS_CACHE is None:
         _EMBEDDINGS_CACHE = HuggingFaceEmbeddings(
             model_name="SamilPwC-AXNode-GenAI/PwC-Embedding_expr",
-            model_kwargs={'device': 'cpu'},
+            model_kwargs={'device': 'cuda'},
             encode_kwargs={'normalize_embeddings': True}
         )
     return _EMBEDDINGS_CACHE
