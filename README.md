@@ -1,6 +1,6 @@
 # MIRROR Framework
 
-**Memory-Integrated Reasoning and Retrieval for Longitudinal Response Prediction**
+**Multi-view Inference via Retrospective Retrieval for Ontological Representation of Persona**
 
 ## Architecture Overview (Paper Figure 2)
 

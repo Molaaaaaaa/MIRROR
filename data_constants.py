@@ -1,5 +1,5 @@
 """
-Data-dependent constants for KCYPS (Korean Children and Youth Panel Survey) dataset.
+Data-dependent constants for MIRROR-Violence (MIRROR-V) dataset.
 
 These values must match the category names and response labels in the raw CSV data.
 Korean text represents actual survey response labels - do not modify unless 
@@ -132,7 +132,7 @@ NEGATIVE_KEYWORDS = [
 ]
 
 # CSV COLUMN NAMES
-# Column headers used in KCYPS dataset CSV files
+# Column headers used in MIRROR-V dataset CSV files
 CSV_COLUMNS = {
     # Question column names (priority order)
     'question': ['설문 문항', '문항'],           # Survey question, Question
@@ -173,7 +173,7 @@ INPUT_VARIABLE_KEYWORDS = {
 }
 
 # CATEGORY NAMES
-# Survey category names used in KCYPS dataset
+# Survey category names used in MIRROR-V dataset
 CATEGORY_AGGRESSION = "공격성"                           # Aggression
 CATEGORY_SCHOOL_VIOLENCE = "학교 폭력"                   # School Violence
 CATEGORY_SOCIAL_WITHDRAWAL = "사회적 위축"               # Social Withdrawal
