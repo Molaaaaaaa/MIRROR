@@ -68,7 +68,7 @@ class BaselinePredictor:
             temperature=0.0,
             num_predict=50,
             num_ctx=Config.NUM_CTX,
-            # reasoning=False,  # set True for reasoning models
+            reasoning=False,
             timeout=Config.LLM_TIMEOUT
         )
     

@@ -16,9 +16,7 @@ class Config:
 
     # Ollama Configuration (local models)
     OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    # OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:14b-q8_0")
-    # OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma3-27b-q8:latest")
-    OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma3:12b-it-q8_0")
+    OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:14b-q8_0")
 
     # OpenAI API Configuration
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "YOUR_OPENAI_API_KEY")
@@ -32,7 +30,7 @@ class Config:
     BATCH_SIZE = 16
     CONCURRENT_REQUESTS = 16
     LLM_TIMEOUT = 600
-    NUM_CTX = 1024
+    NUM_CTX = 4096
     
     KNOWLEDGE_YEARS = [2018, 2019, 2020, 2021, 2022]
     ANALYSIS_YEARS = [2019, 2020, 2021, 2022]

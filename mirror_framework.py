@@ -74,6 +74,7 @@ def get_llm(temperature: float = 0.0, max_tokens: int = 250, timeout: int = None
             temperature=temperature,
             num_predict=max_tokens,
             num_ctx=getattr(Config, 'NUM_CTX', 4096),
+            reasoning=False,
             timeout=timeout
         )
 
